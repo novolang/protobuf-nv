@@ -1,0 +1,942 @@
+// tests/protobuf_tests.nv — the encoding specification's own worked
+// examples, and the descriptor rules that decide what generated code
+// looks like.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// <module>.<fn>` from the `todo()` that is each body.  That is the
+// expected state of an interface release: the compiler has checked
+// every signature, every type and every effect row, and nothing else
+// has been checked because there is nothing else yet.
+//
+// WHERE THE VECTORS COME FROM.  Every byte string below is from
+// protobuf's own "Encoding" page — the `08 96 01`, the `12 07
+// testing`, the embedded message and the packed `[3, 270, 86942]` are
+// that document's four worked examples, in its own order — or from
+// `descriptor.proto`, which is the only statement of what a descriptor
+// set contains.  A test that passes here is bytes that `protoc` and
+// every other implementation read the same way.
+
+use std.test
+use std.bytes
+use pbwire
+use pbread
+use pbwrite
+use pbunknown
+use pbdesc
+use pbdyn
+use pbgen
+use pberr
+
+// ── keys and wire types ─────────────────────────────────────────────
+
+@test
+fn test_a_key_is_the_field_number_shifted_up_three()
+    // The encoding page's first sentence made checkable: field 1,
+    // length-delimited, is 0x0a — which is why almost every message
+    // anyone has ever hexdumped starts with it.
+    test.assert_eq(pbwire.key_of(pbwire.tag(1, PbWireBytes)), 10)
+    test.assert_eq(pbwire.key_of(pbwire.tag(1, PbWireVarint)), 8)
+    test.assert_eq(pbwire.key_of(pbwire.tag(2, PbWireBytes)), 18)
+    test.assert_eq(pbwire.key_of(pbwire.tag(3, PbWireBytes)), 26)
+    test.assert_eq(pbwire.key_of(pbwire.tag(4, PbWireBytes)), 34)
+
+@test
+fn test_a_key_reads_back_to_the_tag_that_made_it()
+    match pbwire.tag_of_key(10)
+        Some(t) =>
+            test.assert_eq(t.field, 1)
+            test.assert_eq(pbwire.wire_code(t.wire), 2)
+        None    => test.fail("0x0a is field 1, wire type 2")
+
+@test
+fn test_wire_codes_six_and_seven_are_not_wire_types()
+    // The two values left over from four shapes and two group markers.
+    // They are the most common way a decoder learns it is not reading
+    // protobuf at all.
+    match pbwire.wire_of_code(6)
+        Some(_) => test.fail("6 is not a wire type")
+        None    => test.assert_eq(1, 1)
+    match pbwire.wire_of_code(7)
+        Some(_) => test.fail("7 is not a wire type")
+        None    => test.assert_eq(1, 1)
+
+@test
+fn test_field_zero_is_not_a_field()
+    match pbwire.tag_of_key(2)
+        Some(_) => test.fail("field number 0 is not a field number")
+        None    => test.assert_eq(1, 1)
+
+@test
+fn test_the_field_number_range_is_twenty_nine_bits_minus_the_reserved_block()
+    test.assert_eq(pbwire.min_field_number(), 1)
+    test.assert_eq(pbwire.max_field_number(), 536870911)
+    test.assert_eq(pbwire.reserved_first(), 19000)
+    test.assert_eq(pbwire.reserved_last(), 19999)
+    test.assert_eq(pbwire.is_field_number(0), false)
+    test.assert_eq(pbwire.is_field_number(1), true)
+    test.assert_eq(pbwire.is_field_number(19000), false)
+    test.assert_eq(pbwire.is_field_number(19999), false)
+    test.assert_eq(pbwire.is_field_number(20000), true)
+    test.assert_eq(pbwire.is_field_number(536870912), false)
+
+@test
+fn test_a_key_is_one_byte_up_to_field_fifteen_and_two_after_it()
+    // The reason a `.proto` file that expects to be hot puts its
+    // frequently set fields in 1 through 15, and worth knowing before
+    // the numbers are chosen rather than after.
+    test.assert_eq(pbwire.key_len(pbwire.tag(15, PbWireVarint)), 1)
+    test.assert_eq(pbwire.key_len(pbwire.tag(16, PbWireVarint)), 2)
+    test.assert_eq(pbwire.key_len(pbwire.tag(2047, PbWireVarint)), 2)
+    test.assert_eq(pbwire.key_len(pbwire.tag(2048, PbWireVarint)), 3)
+
+// ── the encoding page's four worked examples ────────────────────────
+
+@test
+fn test_the_first_worked_example_is_field_one_varint_one_hundred_and_fifty()
+    // `08 96 01`.  The document's own opening example.
+    let buf = bytes.from_hex("089601") ?? bytes.zeros(0)
+    match pbread.walk(buf, pbread.default_limits())
+        Ok(evs) =>
+            test.assert_eq(evs.len(), 1)
+            match evs[0]
+                PbFieldSeen(t, v, at, raw_len) =>
+                    test.assert_eq(t.field, 1)
+                    test.assert_eq(at, 0)
+                    test.assert_eq(raw_len, 3)
+                    match v
+                        PbRawVarint(bits) => test.assert_eq(bits, 150)
+                        _                 => test.fail("field 1 is a varint")
+                _                              => test.fail("expected a field")
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_the_second_worked_example_is_a_string()
+    // `12 07 74 65 73 74 69 6e 67` — field 2, seven bytes, "testing".
+    let buf = bytes.from_hex("120774657374696e67") ?? bytes.zeros(0)
+    match pbread.walk(buf, pbread.default_limits())
+        Ok(evs) =>
+            test.assert_eq(evs.len(), 1)
+            match evs[0]
+                PbFieldSeen(t, v, _, raw_len) =>
+                    test.assert_eq(t.field, 2)
+                    test.assert_eq(raw_len, 9)
+                    match v
+                        PbRawBytes(data) => test.assert_eq(bytes.len(data), 7)
+                        _                => test.fail("field 2 is length-delimited")
+                _                             => test.fail("expected a field")
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_the_third_worked_example_is_a_message_inside_a_message()
+    // `1a 03 08 96 01` — field 3 carries the first example whole.  The
+    // payload is handed over as bytes rather than nested, because only
+    // a schema knows that a length-delimited field is a submessage.
+    let buf = bytes.from_hex("1a03089601") ?? bytes.zeros(0)
+    match pbread.walk(buf, pbread.default_limits())
+        Ok(evs) =>
+            test.assert_eq(evs.len(), 1)
+            match evs[0]
+                PbFieldSeen(t, v, _, _) =>
+                    test.assert_eq(t.field, 3)
+                    match v
+                        PbRawBytes(data) =>
+                            // And the nested bytes read as the first
+                            // example, which is what re-entering costs.
+                            match pbread.walk(data, pbread.default_limits())
+                                Ok(inner) => test.assert_eq(inner.len(), 1)
+                                Err(e)    => test.fail(e.message())
+                        _                => test.fail("field 3 is length-delimited")
+                _                       => test.fail("expected a field")
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_the_fourth_worked_example_is_a_packed_repeated_field()
+    // `22 06 03 8e 02 9e a7 05` — field 4, six bytes, the three varints
+    // 3, 270 and 86942 with one key between them instead of three.
+    let buf = bytes.from_hex("2206038e029ea705") ?? bytes.zeros(0)
+    match pbread.walk(buf, pbread.default_limits())
+        Ok(evs) =>
+            match evs[0]
+                PbFieldSeen(t, v, _, _) =>
+                    test.assert_eq(t.field, 4)
+                    match v
+                        PbRawBytes(data) =>
+                            match pbread.unpack(data, PbTypeInt32)
+                                Ok(items) =>
+                                    test.assert_eq(items.len(), 3)
+                                    match items[2]
+                                        PbRawVarint(bits) => test.assert_eq(bits, 86942)
+                                        _                 => test.fail("packed int32 is a varint")
+                                Err(e)    => test.fail(e.message())
+                        _                => test.fail("a packed field is length-delimited")
+                _                       => test.fail("expected a field")
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_a_packed_payload_that_does_not_divide_is_refused()
+    // Six bytes of packed fixed32 is one element and two bytes left
+    // over, which no writer could have produced.
+    let buf = bytes.from_hex("010203040506") ?? bytes.zeros(0)
+    match pbwire.packed_element_count(buf, 0, 6, PbTypeFixed32)
+        Ok(_)  => test.fail("six bytes is not a whole number of fixed32")
+        Err(e) =>
+            match e
+                PbPackedRemainder(_, left) => test.assert_eq(left, 2)
+                _                          => test.fail("expected PbPackedRemainder: ${e.message()}")
+
+// ── the signed integer story, which is the encoding's one wart ──────
+
+@test
+fn test_a_negative_int32_costs_ten_bytes_and_an_sint32_costs_one()
+    // The single fact that decides which type a `.proto` file should
+    // declare, and the reason `sint32` exists at all.
+    test.assert_eq(pbwire.int32_len(0 - 1), 10)
+    test.assert_eq(pbwire.sint32_len(0 - 1), 1)
+    test.assert_eq(pbwire.int32_len(1), 1)
+    test.assert_eq(pbwire.sint32_len(1), 1)
+
+@test
+fn test_the_zigzag_fold_is_the_specification_s_own_table()
+    // The encoding page's table: 0, -1, 1, -2, 2 fold to 0, 1, 2, 3, 4,
+    // and the two thirty-two-bit extremes fold to the top of the range.
+    var c = bytes.cursor_le(bytes.zeros(16))
+    match pbwire.write_sint32_into(0, c)
+        Ok(n)  => test.assert_eq(n, 1)
+        Err(e) => test.fail(e.message())
+    test.assert_eq(pbwire.sint32_len(2147483647), 5)
+    test.assert_eq(pbwire.sint32_len(0 - 2147483648), 5)
+
+@test
+fn test_int32_is_sign_extended_to_sixty_four_bits()
+    // The rule that makes `int32` and `int64` wire-compatible in both
+    // directions, and that makes a negative `int32` ten bytes long.
+    test.assert_eq(pbwire.int32_of_wire(pbwire.int32_to_wire(0 - 1)), 0 - 1)
+    test.assert_eq(pbwire.int32_of_wire(pbwire.int32_to_wire(0 - 2147483648)), 0 - 2147483648)
+    test.assert_eq(pbwire.int32_to_wire(7), 7)
+
+// ── the wire type of each declared type ─────────────────────────────
+
+@test
+fn test_eighteen_declared_types_collapse_onto_four_shapes()
+    // The many-to-few map that is the whole reason a reader can skip a
+    // field it does not know.
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeInt32)), 0)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeSint64)), 0)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeBool)), 0)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeEnum)), 0)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeDouble)), 1)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeFixed64)), 1)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeString)), 2)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeMessage)), 2)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeGroup)), 3)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeFloat)), 5)
+    test.assert_eq(pbwire.wire_code(pbwire.wire_for(PbTypeSfixed32)), 5)
+
+@test
+fn test_the_type_numbers_are_descriptor_proto_s_own()
+    // `FieldDescriptorProto.Type`, so a descriptor set read by this
+    // package and one read by protoc name the same types.
+    test.assert_eq(pbwire.type_code(PbTypeDouble), 1)
+    test.assert_eq(pbwire.type_code(PbTypeString), 9)
+    test.assert_eq(pbwire.type_code(PbTypeMessage), 11)
+    test.assert_eq(pbwire.type_code(PbTypeBytes), 12)
+    test.assert_eq(pbwire.type_code(PbTypeSint64), 18)
+    test.assert_eq(pbwire.type_proto_name(PbTypeSfixed64), "sfixed64")
+
+@test
+fn test_only_scalars_can_be_packed()
+    test.assert_eq(pbwire.is_packable(PbTypeInt32), true)
+    test.assert_eq(pbwire.is_packable(PbTypeDouble), true)
+    test.assert_eq(pbwire.is_packable(PbTypeEnum), true)
+    test.assert_eq(pbwire.is_packable(PbTypeString), false)
+    test.assert_eq(pbwire.is_packable(PbTypeBytes), false)
+    test.assert_eq(pbwire.is_packable(PbTypeMessage), false)
+
+@test
+fn test_packed_is_the_default_in_proto3_and_not_in_proto2()
+    // The default flipped between the syntaxes, which is why the
+    // question takes the syntax rather than answering it once.  A
+    // DECODER accepts both forms whatever the default is.
+    test.assert_eq(pbwire.packed_by_default(PbTypeInt32, true), true)
+    test.assert_eq(pbwire.packed_by_default(PbTypeInt32, false), false)
+    test.assert_eq(pbwire.packed_by_default(PbTypeString, true), false)
+
+// ── what a reader refuses ───────────────────────────────────────────
+
+@test
+fn test_a_length_past_the_end_is_refused_before_anything_is_reserved()
+    // `0a ff ff ff 7f` — field 1 announcing 268435455 bytes it does
+    // not have.  A length-delimited field is an allocation instruction
+    // from whoever sent it.
+    let buf = bytes.from_hex("0affffff7f") ?? bytes.zeros(0)
+    match pbread.walk(buf, pbread.default_limits())
+        Ok(_)  => test.fail("that length is past the end of the buffer")
+        Err(e) =>
+            match e
+                PbLengthOverrun(_, _, left) => test.assert_eq(left, 0)
+                _                           => test.fail("expected PbLengthOverrun: ${e.message()}")
+
+@test
+fn test_a_varint_past_ten_bytes_is_refused()
+    let buf = bytes.from_hex("08ffffffffffffffffffff01") ?? bytes.zeros(0)
+    match pbread.walk(buf, pbread.default_limits())
+        Ok(_)  => test.fail("a varint is at most ten bytes")
+        Err(e) =>
+            match e
+                PbVarintOverflow(_, n) => test.assert_eq(n > 10, true)
+                _                      => test.fail("expected PbVarintOverflow: ${e.message()}")
+
+@test
+fn test_an_unterminated_varint_is_truncation_and_not_corruption()
+    // The continuation bit is set and the input stops.  On a socket
+    // that is the ordinary case, which is why `feed` answers a step
+    // and only `finish` calls it a fault.
+    let buf = bytes.from_hex("0896") ?? bytes.zeros(0)
+    match pbread.walk(buf, pbread.default_limits())
+        Ok(_)  => test.fail("that varint has no last byte")
+        Err(e) =>
+            match e
+                PbTruncated(at, _) => test.assert_eq(at, 1)
+                _                  => test.fail("expected PbTruncated: ${e.message()}")
+
+@test
+fn test_a_field_split_across_two_chunks_waits_for_the_rest()
+    let head = bytes.from_hex("0896") ?? bytes.zeros(0)
+    let tail = bytes.from_hex("01") ?? bytes.zeros(0)
+    match pbread.feed(pbread.reader(pbread.default_limits()), bytes.to_byte_list(head))
+        Ok(s1) =>
+            test.assert_eq(s1.events.len(), 0)
+            match pbread.feed(s1.reader, bytes.to_byte_list(tail))
+                Ok(s2) => test.assert_eq(s2.events.len(), 1)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_depth_bound_is_a_number_somebody_chose()
+    test.assert_eq(pbread.default_limits().max_depth, 100)
+    test.assert_eq(pbread.strict_limits().max_depth, 32)
+    test.assert_eq(pbread.default_limits().check_utf8, true)
+
+// ── groups, which are still on the wire ─────────────────────────────
+
+@test
+fn test_a_group_brackets_its_fields()
+    // `0b 08 96 01 0c` — field 1 as a group, holding the first worked
+    // example.  proto2's older nesting, deprecated since 2008 and still
+    // in front of a great deal of deployed software.
+    let buf = bytes.from_hex("0b0896010c") ?? bytes.zeros(0)
+    match pbread.walk(buf, pbread.default_limits())
+        Ok(evs) =>
+            test.assert_eq(evs.len(), 3)
+            match evs[0]
+                PbGroupStart(field, _) => test.assert_eq(field, 1)
+                _                      => test.fail("expected a group start")
+            match evs[2]
+                PbGroupEnd(field, _) => test.assert_eq(field, 1)
+                _                    => test.fail("expected a group end")
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_a_group_left_open_is_refused_at_the_end_and_not_before()
+    let buf = bytes.from_hex("0b089601") ?? bytes.zeros(0)
+    match pbread.walk(buf, pbread.default_limits())
+        Ok(_)  => test.fail("that group never closes")
+        Err(e) =>
+            match e
+                PbUnclosedGroup(_, field) => test.assert_eq(field, 1)
+                _                         => test.fail("expected PbUnclosedGroup: ${e.message()}")
+
+// ── the fields nobody declared, kept ────────────────────────────────
+
+@test
+fn test_a_field_the_schema_does_not_declare_is_kept_whole()
+    // The single behaviour that makes protobuf's compatibility story
+    // true rather than aspirational: a version 3 service reading a
+    // version 4 message must send version 4's fields on.
+    let buf = bytes.from_hex("089601") ?? bytes.zeros(0)
+    match pbread.partition(buf, [2], pbread.default_limits())
+        Ok(p)  =>
+            test.assert_eq(p.known.len(), 0)
+            test.assert_eq(pbunknown.count(p.unknown), 1)
+            test.assert_eq(pbunknown.has_number(p.unknown, 1), true)
+            // Kept whole: three bytes, key included.
+            test.assert_eq(pbunknown.encoded_len(p.unknown), 3)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_field_the_schema_does_declare_is_not_kept_twice()
+    let buf = bytes.from_hex("089601") ?? bytes.zeros(0)
+    match pbread.partition(buf, [1], pbread.default_limits())
+        Ok(p)  =>
+            test.assert_eq(p.known.len(), 1)
+            test.assert_eq(pbunknown.count(p.unknown), 0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_repeated_unknown_field_is_two_entries_and_not_one()
+    // A repeated field is exactly that on the wire, and the reader does
+    // not know which of the two arrivals this one is.
+    let buf = bytes.from_hex("089601089701") ?? bytes.zeros(0)
+    match pbread.partition(buf, [], pbread.default_limits())
+        Ok(p)  =>
+            test.assert_eq(pbunknown.count(p.unknown), 2)
+            test.assert_eq(pbunknown.by_number(p.unknown, 1).len(), 2)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_dropping_a_number_is_what_a_program_that_learned_a_field_does()
+    let buf = bytes.from_hex("089601") ?? bytes.zeros(0)
+    match pbread.partition(buf, [], pbread.default_limits())
+        Ok(p)  => test.assert_eq(pbunknown.count(pbunknown.drop_number(p.unknown, 1)), 0)
+        Err(e) => test.fail(e.message())
+
+// ── writing ─────────────────────────────────────────────────────────
+
+@test
+fn test_the_builder_produces_the_first_worked_example()
+    let b = pbwrite.builder(pbwrite.build_limits())
+    match pbwrite.put_varint(b, 1, 150)
+        Ok(b2) =>
+            match pbwrite.done(b2)
+                Ok(out) => test.assert_eq(bytes.to_hex(out), "089601")
+                Err(e)  => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_sizing_first_agrees_with_writing()
+    // The sizing pass is the answer to the length prefix problem, so a
+    // size that disagreed with the write would be the defect that
+    // matters most in this package.
+    test.assert_eq(pbwrite.varint_field_len(1, 150), 3)
+    test.assert_eq(pbwrite.delimited_field_len(2, 7), 9)
+    test.assert_eq(pbwrite.delimited_field_len(3, 3), 5)
+    test.assert_eq(pbwrite.int32_field_len(1, 0 - 1), 11)
+
+@test
+fn test_a_reserved_field_number_is_refused_on_the_way_out()
+    // Refused when written and READ when it arrives: a peer's mistake
+    // is not a reason to drop a connection, and a program that writes
+    // one is this program's bug.
+    var c = bytes.cursor_le(bytes.zeros(16))
+    match pbwire.write_tag_into(pbwire.tag(19500, PbWireVarint), c)
+        Ok(_)  => test.fail("19000 to 19999 belongs to the descriptor language")
+        Err(e) =>
+            match e
+                PbReservedFieldNumber(field) => test.assert_eq(field, 19500)
+                _                            => test.fail("expected PbReservedFieldNumber: ${e.message()}")
+
+@test
+fn test_a_buffer_too_small_says_how_much_more_it_wanted()
+    var c = bytes.cursor_le(bytes.zeros(1))
+    match pbwrite.write_varint_field(1, 150, c)
+        Ok(_)  => test.fail("three bytes do not fit in one")
+        Err(e) =>
+            match e
+                PbBufferTooSmall(need, left) =>
+                    test.assert_eq(need, 3)
+                    test.assert_eq(left, 1)
+                _                            => test.fail("expected PbBufferTooSmall: ${e.message()}")
+
+// ── descriptors ─────────────────────────────────────────────────────
+
+@test
+fn test_an_absent_syntax_statement_means_proto2()
+    // What the specification says, and what a generator that assumed
+    // proto3 would get wrong for every file written before 2016.
+    match pbdesc.syntax_of_name("proto2")
+        Some(s) => test.assert_eq(pbdesc.syntax_name(s), "proto2")
+        None    => test.fail("proto2 is a syntax")
+    match pbdesc.syntax_of_name("editions")
+        Some(_) => test.fail("editions are not in this release")
+        None    => test.assert_eq(1, 1)
+
+@test
+fn test_the_json_name_is_derived_when_the_descriptor_carries_none()
+    test.assert_eq(pbdesc.default_json_name("unit_price"), "unitPrice")
+    test.assert_eq(pbdesc.default_json_name("id"), "id")
+    test.assert_eq(pbdesc.default_json_name("a_b_c"), "aBC")
+
+@test
+fn test_an_empty_descriptor_set_is_valid_and_describes_nothing()
+    test.assert_eq(pbdesc.validate(PbFileSet { files: [] }).len(), 0)
+
+@test
+fn test_a_descriptor_set_that_is_not_one_is_refused_as_bytes()
+    // 0xff is wire type 7 in field 31 — not protobuf at all.
+    let buf = bytes.from_hex("ff") ?? bytes.zeros(0)
+    match pbdesc.parse_file_set(buf, pbread.default_limits())
+        Ok(_)  => test.fail("0xff is not a descriptor set")
+        Err(e) =>
+            match e
+                PbUnknownWireType(_, wire) => test.assert_eq(wire, 7)
+                _                          => test.fail("expected PbUnknownWireType: ${e.message()}")
+
+@test
+fn test_presence_is_the_rule_proto3_changed()
+    // A proto3 singular scalar cannot tell zero from absent, and a
+    // generator that emitted `?Int` for one would be claiming
+    // information the wire does not carry.
+    let f = PbField { name: "n", json_name: "n", number: 1,
+        label: PbLabelOptional, field_type: PbTypeInt32, type_name: "",
+        oneof_index: 0 - 1, packed_set: false, packed_value: false,
+        proto3_optional: false, default_value: "", deprecated: false }
+    test.assert_eq(pbdesc.has_presence(f, PbProto3), false)
+    test.assert_eq(pbdesc.has_presence(f, PbProto2), true)
+
+@test
+fn test_proto3_optional_gives_a_singular_field_its_presence_back()
+    let f = PbField { name: "n", json_name: "n", number: 1,
+        label: PbLabelOptional, field_type: PbTypeInt32, type_name: "",
+        oneof_index: 0, packed_set: false, packed_value: false,
+        proto3_optional: true, default_value: "", deprecated: false }
+    test.assert_eq(pbdesc.has_presence(f, PbProto3), true)
+
+@test
+fn test_the_two_field_packed_flag_tells_false_from_unsaid()
+    // In proto3 "the file said `packed = false`" and "the file said
+    // nothing" are opposite answers, which one boolean cannot carry.
+    let unsaid = PbField { name: "xs", json_name: "xs", number: 1,
+        label: PbLabelRepeated, field_type: PbTypeInt32, type_name: "",
+        oneof_index: 0 - 1, packed_set: false, packed_value: false,
+        proto3_optional: false, default_value: "", deprecated: false }
+    let said_false = PbField { name: "xs", json_name: "xs", number: 1,
+        label: PbLabelRepeated, field_type: PbTypeInt32, type_name: "",
+        oneof_index: 0 - 1, packed_set: true, packed_value: false,
+        proto3_optional: false, default_value: "", deprecated: false }
+    test.assert_eq(pbdesc.packed_of(unsaid, PbProto3), true)
+    test.assert_eq(pbdesc.packed_of(said_false, PbProto3), false)
+    test.assert_eq(pbdesc.packed_of(unsaid, PbProto2), false)
+
+@test
+fn test_the_well_known_types_are_named_and_not_translated()
+    test.assert_eq(pbdesc.is_well_known(".google.protobuf.Timestamp"), true)
+    test.assert_eq(pbdesc.is_well_known(".google.protobuf.Any"), true)
+    test.assert_eq(pbdesc.is_well_known(".acme.Order"), false)
+
+// ── the dynamic message ─────────────────────────────────────────────
+
+@test
+fn test_a_dynamic_message_starts_empty()
+    let m = pbdyn.message(".acme.Order")
+    test.assert_eq(pbdyn.set_numbers(m).len(), 0)
+    test.assert_eq(pbdyn.has(m, 1), false)
+
+@test
+fn test_setting_then_getting_answers_the_value_that_was_set()
+    let m = pbdyn.set(pbdyn.message(".acme.Order"), 1, PbNum(150))
+    match pbdyn.get(m, 1)
+        Some(v) =>
+            test.assert_eq(pbdyn.value_kind(v), "num")
+            match v
+                PbNum(n) => test.assert_eq(n, 150)
+                _        => test.fail("that is the value that was set")
+        None    => test.fail("field 1 was set")
+
+@test
+fn test_sixty_four_unsigned_bits_print_as_the_number_they_are()
+    // `PbNum(-1)` holding a uint64 is 18446744073709551615, and
+    // printing the Int would say -1.  Nothing is lost; the reading is.
+    test.assert_eq(pbdyn.uint64_text(0 - 1), "18446744073709551615")
+    test.assert_eq(pbdyn.uint64_text(150), "150")
+    match pbdyn.uint64_of_text("18446744073709551615")
+        Some(bits) => test.assert_eq(bits, 0 - 1)
+        None       => test.fail("that number is below 2^64")
+
+// ── the generated-code contract ─────────────────────────────────────
+
+@test
+fn test_a_generated_type_name_carries_the_proto_package()
+    // novo-lang keys struct identity by name across the whole
+    // assembly, so two generated trees that both said `Order` could
+    // not be used by one program.  The `.proto` package is the
+    // disambiguator the author already chose.
+    test.assert_eq(pbgen.novo_type_name(".acme.orders.Order"), "AcmeOrdersOrder")
+    test.assert_eq(pbgen.novo_type_name(".Order"), "Order")
+
+@test
+fn test_a_generated_field_name_is_the_proto_name_unless_it_is_reserved()
+    test.assert_eq(pbgen.novo_field_name("unit_price"), "unit_price")
+    test.assert_eq(pbgen.novo_field_name("loop"), "loop_")
+    test.assert_eq(pbgen.novo_field_name("then"), "then_")
+    test.assert_eq(pbgen.is_reserved_word("register"), true)
+    test.assert_eq(pbgen.is_reserved_word("unit_price"), false)
+
+@test
+fn test_a_generated_module_name_folds_the_file_path_in()
+    test.assert_eq(pbgen.novo_module_name("acme/order.proto"), "acme_order")
+    test.assert_eq(pbgen.novo_module_name("order.proto"), "order")
+
+@test
+fn test_a_oneof_becomes_an_enum_named_for_its_message()
+    test.assert_eq(pbgen.novo_oneof_type_name(".acme.Order", "payment"), "AcmeOrderPayment")
+
+@test
+fn test_an_enum_variant_carries_its_enum_and_loses_the_screaming_prefix()
+    test.assert_eq(pbgen.novo_variant_name(".acme.Currency", "CURRENCY_EUR"), "AcmeCurrencyEur")
+
+@test
+fn test_a_map_becomes_a_list_of_pairs_with_a_named_pair_type()
+    test.assert_eq(pbgen.novo_map_entry_type_name(".acme.Order", "tags"), "AcmeOrderTagsEntry")
+
+@test
+fn test_eight_integral_types_generate_as_one_int()
+    // novo-lang has one integer type and it is sixty-four bits signed.
+    // The honest mapping, and what it costs is `uint64_text`.
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeInt32), "Int")
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeUint64), "Int")
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeSfixed32), "Int")
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeDouble), "Float")
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeFloat), "Float")
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeBool), "Bool")
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeString), "Str")
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeBytes), "Bytes")
+
+@test
+fn test_every_generated_struct_has_somewhere_to_keep_what_it_did_not_know()
+    // A struct without it is a struct that silently drops a newer
+    // peer's fields, which is the failure this package is arranged to
+    // prevent.
+    test.assert_eq(pbgen.unknown_field_name(), "unknown")
+
+@test
+fn test_the_generated_function_names_are_derived_and_not_invented()
+    test.assert_eq(pbgen.encode_fn_name(".acme.Order"), "encode_acme_order")
+    test.assert_eq(pbgen.decode_fn_name(".acme.Order"), "decode_acme_order")
+    test.assert_eq(pbgen.len_fn_name(".acme.Order"), "encoded_len_acme_order")
+
+@test
+fn test_a_file_the_generator_refuses_produces_nothing_and_says_why()
+    let f = PbFile { name: "acme/order.proto", package: "acme",
+        syntax: PbProto3, dependency: [], public_dependency: [],
+        messages: [], enums: [], services: [],
+        options: PbFileOptions { deprecated: false, go_package: "",
+            java_package: "", unknown: pbunknown.empty() } }
+    test.assert_eq(pbgen.refusals(f).len(), 0)
+    test.assert_eq(pbgen.generate(f).len(), 1)
+
+// ── the rest of the surface, called once at its declared types ──────
+//
+// Every assertion below is red today for the same reason as every
+// assertion above, and each one is here for a second reason: a
+// signature nothing calls is a signature the compiler has checked
+// against no call site.  These name the functions the sections above
+// did not, at real arguments, so that a type that cannot be passed is
+// found now rather than by the first person to try.
+
+fn a_field() -> PbField
+    PbField { name: "n", json_name: "n", number: 1,
+        label: PbLabelOptional, field_type: PbTypeInt32, type_name: "",
+        oneof_index: 0 - 1, packed_set: false, packed_value: false,
+        proto3_optional: false, default_value: "", deprecated: false }
+
+fn a_message() -> PbMessage
+    PbMessage { name: "Order", full_name: ".acme.Order",
+        fields: [a_field()], oneofs: [], nested: [], enums: [],
+        extension_ranges: [], reserved_ranges: [], reserved_names: [],
+        map_entry: false, deprecated: false, unknown: pbunknown.empty() }
+
+fn a_service() -> PbService
+    PbService { name: "Orders", full_name: ".acme.Orders",
+        methods: [PbMethod { name: "Get", input_type: ".acme.GetReq",
+            output_type: ".acme.Order", streaming: PbUnary,
+            deprecated: false, unknown: pbunknown.empty() }],
+        deprecated: false, unknown: pbunknown.empty() }
+
+fn a_file() -> PbFile
+    PbFile { name: "acme/order.proto", package: "acme", syntax: PbProto3,
+        dependency: [], public_dependency: [], messages: [a_message()],
+        enums: [], services: [a_service()],
+        options: PbFileOptions { deprecated: false, go_package: "",
+            java_package: "", unknown: pbunknown.empty() } }
+
+fn a_set() -> PbFileSet
+    PbFileSet { files: [a_file()] }
+
+@test
+fn test_every_wire_scalar_writer_takes_a_cursor_and_answers_a_count()
+    var c = bytes.cursor_le(bytes.zeros(64))
+    test.assert_eq(ok_count(pbwire.write_varint_into(150, c)), 2)
+    test.assert_eq(ok_count(pbwire.write_int32_into(0 - 1, c)), 10)
+    test.assert_eq(ok_count(pbwire.write_sint64_into(0 - 1, c)), 1)
+    test.assert_eq(ok_count(pbwire.write_fixed32_into(1, c)), 4)
+    test.assert_eq(ok_count(pbwire.write_fixed64_into(1, c)), 8)
+    test.assert_eq(ok_count(pbwire.write_float_into(1.0, c)), 4)
+    test.assert_eq(ok_count(pbwire.write_double_into(1.0, c)), 8)
+
+fn ok_count(r: Result<Int, PbEncodeError>) -> Int
+    match r
+        Ok(n)  => n
+        Err(e) =>
+            test.fail(e.message())
+            0 - 1
+
+fn read_value(r: Result<PbIntAt, PbDecodeError>) -> Int
+    match r
+        Ok(v)  => v.value
+        Err(e) =>
+            test.fail(e.message())
+            0 - 1
+
+@test
+fn test_every_wire_scalar_reader_answers_the_value_and_its_length()
+    // `96 01` is 150 as a varint; `01 00 00 00` is 1 as a fixed32; the
+    // eight-byte forms follow the same little-endian rule.
+    let v = bytes.from_hex("9601") ?? bytes.zeros(0)
+    let f4 = bytes.from_hex("01000000") ?? bytes.zeros(0)
+    let f8 = bytes.from_hex("0100000000000000") ?? bytes.zeros(0)
+    test.assert_eq(read_value(pbwire.read_varint_at(v, 0)), 150)
+    test.assert_eq(read_value(pbwire.read_int32_at(v, 0)), 150)
+    test.assert_eq(read_value(pbwire.read_sint32_at(v, 0)), 75)
+    test.assert_eq(read_value(pbwire.read_sint64_at(v, 0)), 75)
+    test.assert_eq(read_value(pbwire.read_fixed32_at(f4, 0)), 1)
+    test.assert_eq(read_value(pbwire.read_sfixed32_at(f4, 0)), 1)
+    test.assert_eq(read_value(pbwire.read_fixed64_at(f8, 0)), 1)
+    test.assert_eq(read_value(pbwire.read_sfixed64_at(f8, 0)), 1)
+    match pbwire.read_float_at(f4, 0)
+        Ok(r)  => test.assert_eq(r.len, 4)
+        Err(e) => test.fail(e.message())
+    match pbwire.read_double_at(f8, 0)
+        Ok(r)  => test.assert_eq(r.len, 8)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_sizes_agree_with_the_widths()
+    test.assert_eq(pbwire.varint_len(150), 2)
+    test.assert_eq(pbwire.sint64_len(0 - 1), 1)
+    test.assert_eq(pbwire.fixed_width(PbWireFixed64), 8)
+    test.assert_eq(pbwire.fixed_width(PbWireFixed32), 4)
+    test.assert_eq(pbwire.fixed_width(PbWireBytes), 0 - 1)
+    test.assert_eq(pbwire.field_len(pbwire.tag(1, PbWireBytes), 3), 5)
+
+@test
+fn test_a_type_code_reads_back_to_the_type_that_made_it()
+    match pbwire.type_of_code(9)
+        Some(t) => test.assert_eq(pbwire.type_proto_name(t), "string")
+        None    => test.fail("9 is TYPE_STRING")
+    match pbwire.type_of_code(0)
+        Some(_) => test.fail("0 is not a declared type")
+        None    => test.assert_eq(1, 1)
+
+@test
+fn test_reading_a_key_by_offset_answers_the_tag_and_its_width()
+    let buf = bytes.from_hex("0a03616263") ?? bytes.zeros(0)
+    match pbwire.read_tag_at(buf, 0)
+        Ok(t)  =>
+            test.assert_eq(t.tag.field, 1)
+            test.assert_eq(t.len, 1)
+            // And the payload's own length, so a reader with no schema
+            // can step to the next key.
+            match pbwire.skip_at(buf, 1, t.tag)
+                Ok(n)  => test.assert_eq(n, 4)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_reader_reports_where_it_is()
+    let r = pbread.reader(pbread.default_limits())
+    test.assert_eq(pbread.offset(r), 0)
+    test.assert_eq(pbread.pending_len(r), 0)
+    test.assert_eq(pbread.depth(r), 0)
+    test.assert_eq(pbread.at_boundary(r), true)
+
+@test
+fn test_walking_a_range_reads_a_submessage_without_copying_it_out()
+    // `1a 03 08 96 01` — the three payload bytes at offset 2 are the
+    // nested message.
+    let buf = bytes.from_hex("1a03089601") ?? bytes.zeros(0)
+    match pbread.walk_range(buf, 2, 3, pbread.default_limits())
+        Ok(evs) => test.assert_eq(evs.len(), 1)
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_a_kept_set_can_be_read_back_and_merged()
+    let a = pbunknown.keep(pbunknown.empty(), pbwire.tag(1, PbWireVarint),
+        bytes.from_hex("089601") ?? bytes.zeros(0))
+    test.assert_eq(pbunknown.fields_of(a).len(), 1)
+    test.assert_eq(pbunknown.count(pbunknown.merge(a, a)), 2)
+    var c = bytes.cursor_le(bytes.zeros(16))
+    match pbunknown.write_into(a, c)
+        Ok(n)  => test.assert_eq(n, 3)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_every_field_writer_takes_the_callers_buffer()
+    var c = bytes.cursor_le(bytes.zeros(512))
+    let u = pbunknown.empty()
+    let b3 = bytes.from_hex("089601") ?? bytes.zeros(0)
+    test.assert_eq(ok_count(pbwrite.write_int_field(1, 1, c)), 2)
+    test.assert_eq(ok_count(pbwrite.write_sint32_field(1, 0 - 1, c)), 2)
+    test.assert_eq(ok_count(pbwrite.write_sint64_field(1, 0 - 1, c)), 2)
+    test.assert_eq(ok_count(pbwrite.write_bool_field(1, true, c)), 2)
+    test.assert_eq(ok_count(pbwrite.write_fixed32_field(1, 1, c)), 5)
+    test.assert_eq(ok_count(pbwrite.write_fixed64_field(1, 1, c)), 9)
+    test.assert_eq(ok_count(pbwrite.write_float_field(1, 1.0, c)), 5)
+    test.assert_eq(ok_count(pbwrite.write_double_field(1, 1.0, c)), 9)
+    test.assert_eq(ok_count(pbwrite.write_string_field(1, "abc", c)), 5)
+    test.assert_eq(ok_count(pbwrite.write_bytes_field(1, b3, c)), 5)
+    test.assert_eq(ok_count(pbwrite.write_message_field(1, b3, c)), 5)
+    test.assert_eq(ok_count(pbwrite.write_packed_field(1, PbTypeInt32, [1, 2], c)), 4)
+    test.assert_eq(ok_count(pbwrite.write_repeated_varint_field(1, [1, 2], c)), 4)
+    test.assert_eq(ok_count(pbwrite.write_group_field(1, b3, c)), 5)
+    test.assert_eq(ok_count(pbwrite.write_unknown(u, c)), 0)
+
+@test
+fn test_the_remaining_sizes_are_key_plus_payload()
+    test.assert_eq(pbwrite.sint32_field_len(1, 0 - 1), 2)
+    test.assert_eq(pbwrite.sint64_field_len(1, 0 - 1), 2)
+    test.assert_eq(pbwrite.fixed_field_len(1, PbTypeFixed64), 9)
+    test.assert_eq(pbwrite.packed_payload_len(PbTypeInt32, [1, 2]), 2)
+
+fn ok_builder(r: Result<PbBuilder, PbEncodeError>) -> PbBuilder
+    match r
+        Ok(b)  => b
+        Err(e) =>
+            test.fail(e.message())
+            pbwrite.builder(pbwrite.build_limits())
+
+@test
+fn test_the_builder_nests_and_reports_its_own_state()
+    let b = pbwrite.builder(pbwrite.build_limits())
+    test.assert_eq(pbwrite.builder_depth(b), 0)
+    test.assert_eq(pbwrite.builder_len(b), 0)
+    let inner = ok_builder(pbwrite.begin(b, 3))
+    test.assert_eq(pbwrite.builder_depth(inner), 1)
+    let filled = ok_builder(pbwrite.put_varint(inner, 1, 150))
+    let closed = ok_builder(pbwrite.end(filled))
+    match pbwrite.done(closed)
+        Ok(out) => test.assert_eq(bytes.to_hex(out), "1a03089601")
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_every_builder_put_takes_the_value_its_name_says()
+    let b = pbwrite.builder(pbwrite.build_limits())
+    let b1 = ok_builder(pbwrite.put_sint(b, 1, 0 - 1))
+    let b2 = ok_builder(pbwrite.put_string(b1, 2, "abc"))
+    let b3 = ok_builder(pbwrite.put_bytes(b2, 3, bytes.zeros(1)))
+    let b4 = ok_builder(pbwrite.put_fixed(b3, 4, PbTypeFixed32, 1))
+    let b5 = ok_builder(pbwrite.put_packed(b4, 5, PbTypeInt32, [1, 2]))
+    let b6 = ok_builder(pbwrite.put_unknown(b5, pbunknown.empty()))
+    test.assert_eq(pbwrite.builder_depth(b6), 0)
+
+@test
+fn test_a_descriptor_set_can_be_searched_by_name()
+    let set = a_set()
+    match pbdesc.find_message(set, ".acme.Order")
+        Some(m) => test.assert_eq(m.name, "Order")
+        None    => test.fail("the set declares .acme.Order")
+    match pbdesc.find_enum(set, ".acme.Currency")
+        Some(_) => test.fail("the set declares no enum")
+        None    => test.assert_eq(1, 1)
+    match pbdesc.find_service(set, ".acme.Orders")
+        Some(s) =>
+            match pbdesc.find_method(s, "Get")
+                Some(mm) => test.assert_eq(mm.output_type, ".acme.Order")
+                None     => test.fail("Orders declares Get")
+        None    => test.fail("the set declares .acme.Orders")
+
+@test
+fn test_a_message_can_be_searched_three_ways()
+    let m = a_message()
+    match pbdesc.field_by_number(m, 1)
+        Some(f) => test.assert_eq(f.name, "n")
+        None    => test.fail("field 1 is declared")
+    match pbdesc.field_by_name(m, "n")
+        Some(f) => test.assert_eq(f.number, 1)
+        None    => test.fail("n is declared")
+    match pbdesc.field_by_json_name(m, "n")
+        Some(f) => test.assert_eq(f.number, 1)
+        None    => test.fail("n is its own JSON name")
+    test.assert_eq(pbdesc.oneof_fields(m, 0).len(), 0)
+    test.assert_eq(pbdesc.all_messages(a_file()).len(), 1)
+
+@test
+fn test_a_field_that_is_not_a_map_says_so_three_times()
+    let set = a_set()
+    let f = a_field()
+    test.assert_eq(pbdesc.is_map_field(set, f), false)
+    match pbdesc.map_key_field(set, f)
+        Some(_) => test.fail("a singular int32 is not a map")
+        None    => test.assert_eq(1, 1)
+    match pbdesc.map_value_field(set, f)
+        Some(_) => test.fail("a singular int32 is not a map")
+        None    => test.assert_eq(1, 1)
+
+@test
+fn test_a_file_round_trips_through_its_own_bytes()
+    match pbdesc.write_file_set(a_set())
+        Ok(raw) =>
+            match pbdesc.parse_file_set(raw, pbread.default_limits())
+                Ok(back) => test.assert_eq(back.files.len(), 1)
+                Err(e)   => test.fail(e.message())
+            match pbdesc.parse_file(raw, pbread.default_limits())
+                Ok(f)  => test.assert_eq(f.package, "acme")
+                Err(e) => test.fail(e.message())
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_a_dynamic_message_encodes_reads_and_merges()
+    let set = a_set()
+    let m = pbdyn.set(pbdyn.message(".acme.Order"), 1, PbNum(150))
+    match pbdyn.encoded_len(set, m)
+        Ok(n)  => test.assert_eq(n, 3)
+        Err(e) => test.fail(e.message())
+    match pbdyn.encode(set, m)
+        Ok(raw) =>
+            test.assert_eq(bytes.to_hex(raw), "089601")
+            match pbdyn.decode(set, ".acme.Order", raw, pbread.default_limits())
+                Ok(back) => test.assert_eq(pbdyn.has(back, 1), true)
+                Err(e)   => test.fail(e.message())
+        Err(e)  => test.fail(e.message())
+    var c = bytes.cursor_le(bytes.zeros(16))
+    match pbdyn.encode_into(set, m, c)
+        Ok(n)  => test.assert_eq(n, 3)
+        Err(e) => test.fail(e.message())
+    match pbdyn.get_by_name(set, m, "n")
+        Some(_) => test.fail("field 1 is named n and holds no value yet")
+        None    => test.assert_eq(1, 1)
+    test.assert_eq(pbdyn.has(pbdyn.clear(m, 1), 1), false)
+    test.assert_eq(pbdyn.set_numbers(pbdyn.merge(m, m)).len(), 1)
+    test.assert_eq(pbdyn.type_check(set, m).len(), 0)
+    match pbdyn.which_oneof(set, m, "payment")
+        Some(_) => test.fail("the message declares no oneof")
+        None    => test.assert_eq(1, 1)
+
+@test
+fn test_a_refusal_says_where_or_which_declaration()
+    test.assert_eq(pberr.decode_offset(PbTruncated(at: 12, need: 3)), 12)
+    test.assert_eq(pberr.schema_path(PbDuplicateFieldNumber(path: ".acme.Order", field: 3)),
+        ".acme.Order")
+
+@test
+fn test_the_generator_options_and_the_whole_set_form_are_reachable()
+    let opts = pbgen.default_options()
+    test.assert_eq(opts.carry_comments, true)
+    test.assert_eq(opts.embed_descriptor, false)
+    match pbgen.generate_set(a_set(), opts)
+        Ok(outs) => test.assert_eq(outs.len(), 2)
+        Err(e)   => test.fail(e.message())
+    test.assert_eq(pbgen.novo_field_type(a_set(), a_field(), PbProto3), "Int")
+
+// A source with nothing in it, and no effect at all.
+//
+// `drain` is called against it for the type check rather than for the
+// bytes: every body under it is a `todo()` today, so the call panics
+// before it reads anything.  What the test proves is the SIGNATURE —
+// that a `core` package can take a caller's stream and be charged what
+// that stream costs.
+struct PbEmptySource
+    at_end: Bool
+
+impl Read[] for PbEmptySource
+    fn read(self, n: Int) -> Result<Bytes, IoError> []
+        Ok(bytes.zeros(0))
+
+@test
+fn test_the_bound_effect_parameter_costs_what_the_source_costs()
+    // `drain<S: Read[e]>` is charged whatever the caller's source
+    // costs — nothing for this one, `[io]` for a socket.  That is what
+    // lets the pump be written once inside a `core` package.
+    let r = pbread.reader(pbread.default_limits())
+    match pbread.drain(r, PbEmptySource { at_end: true }, 0)
+        Ok(s)  => test.assert_eq(s.events.len(), 0)
+        Err(e) => test.fail(e.message())

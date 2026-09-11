@@ -1,0 +1,274 @@
+// pbgen — the code generator, as a contract rather than as a program.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT A GENERATOR IS, HERE.  A pure function from a descriptor to
+// novo-lang source text.  It opens nothing, writes nothing and runs no
+// compiler: `generate` answers a list of files-as-strings and the host
+// decides where they go.  That is what keeps this package `core`, and
+// it is also what makes the generator TESTABLE — a golden test is a
+// string comparison, not a build.
+//
+// WHY THE CONTRACT IS PUBLISHED BEFORE THE GENERATOR.  Generated code
+// is an API that a hundred other files depend on, and changing it later
+// is a migration rather than a patch.  The naming rules, the shape of a
+// oneof, the shape of a map, and what proto3 presence turns into are
+// decided here, in signatures a reviewer can argue with, before a line
+// of the generator exists.  The README's "the generated-code contract"
+// section is the same decisions in prose with a worked example beside
+// them.
+//
+// THE NAMING FUNCTIONS ARE THE CONTRACT.  `novo_type_name`,
+// `novo_field_name` and the rest are `pub` because they are the part of
+// the contract a test can pin: a golden file proves one example, and
+// `novo_type_name(".acme.Order") == "AcmeOrder"` proves the rule.  They
+// are also what a SECOND generator — a gRPC stub generator, say — has
+// to agree with, and grpc-codec-nv's service stubs are exactly that
+// second generator.
+
+// What the generator writes, for one output file.
+//
+// `source` is text and not bytes: a generator that produced bytes would
+// be inviting a caller to put something in them that is not source.
+pub struct PbGenerated
+    // The path relative to the output root: `acme/order.nv`.  Derived
+    // from the `.proto` file's own path, so two files that did not
+    // collide as `.proto` do not collide as novo-lang.
+    path: Str
+    // The module name a `use` line writes: `acme_order`.
+    module: Str
+    // The novo-lang source.  Complete, formatted the way `novo fmt`
+    // formats it, and compilable on its own given the modules it
+    // imports.
+    source: Str
+
+// What the generator may be asked to vary.
+//
+// Deliberately short.  Every option is a way for two generated trees to
+// differ, and the ones that are not here — field ordering, comment
+// style, whether to emit builders — are not here because the answer
+// should be the same everywhere.
+pub struct PbGenOptions
+    // Prefixed to every generated module name, for a project that
+    // generates into a subdirectory.  `""` for none.
+    module_prefix: Str
+    // Emit `impl Serialize` and `impl Deserialize` beside the wire
+    // codecs, so a generated struct can also travel as JSON or CBOR
+    // through the standard library's traits.  On by default; a
+    // generated struct with them costs nothing to a caller that never
+    // calls them.
+    serde_impls: Bool
+    // Carry the `.proto` file's comments into the generated source as
+    // doc comments.  On by default, because a generated file with no
+    // prose is a file nobody reads twice.
+    carry_comments: Bool
+    // Emit the file's descriptor bytes as a `const`, so a generated
+    // module can answer a reflection request about itself without the
+    // original `.proto` file.
+    embed_descriptor: Bool
+
+// The options every generated tree should start from.
+//
+// ```novo
+// use pbgen
+//
+// fn main() [io]
+//     println("${pbgen.default_options().serde_impls}")   // true
+// ```
+pub fn default_options() -> PbGenOptions []
+    todo("pbgen.default_options")
+
+// Generate novo-lang source for one file.
+//
+// The signature the grid's row for this package names, and the one a
+// caller reaches for.  An EMPTY LIST IS A REFUSAL: the generator does
+// not guess at a file it cannot generate correctly, and `refusals` is
+// where the reason is.  A caller that wants both at once calls
+// `generate_set`.
+//
+// One file in, one or more files out — one for the messages and enums,
+// and one more per service when the file declares any, because a
+// program that wants the types should not have to compile the stubs.
+pub fn generate(file: PbFile) -> [PbGenerated] []
+    todo("pbgen.generate")
+
+// Generate for a whole descriptor set, with names resolved across
+// files.
+//
+// The form a build system uses: a `type_name` that points into an
+// imported file resolves here and cannot resolve in `generate`, which
+// sees one file and its imports' names but not their contents.
+pub fn generate_set(set: PbFileSet, opts: PbGenOptions) -> Result<[PbGenerated], PbSchemaError> []
+    todo("pbgen.generate_set")
+
+// Every reason the generator will not generate for this file.
+//
+// An empty list means `generate` will produce something.  The list is
+// what a build tool prints, and the four entries it can hold today are
+// named in the README:
+//
+//   an EXTENSION, which needs a run-time registry the generated code
+//   would consult, and that is a design of its own;
+//   a GROUP, which is readable on the wire and has no novo-lang shape
+//   worth generating — a caller that meets one uses `pbdyn`;
+//   an EDITION file, whose feature resolution is a specification this
+//   package does not implement;
+//   a name that no renaming rule can make unique — two `.proto`
+//   messages whose novo-lang names would collide, which the global
+//   type namespace makes a refusal rather than a warning.
+pub fn refusals(file: PbFile) -> [PbSchemaError] []
+    todo("pbgen.refusals")
+
+// ── the naming rules, as functions a test can pin ────────────────────
+
+// The novo-lang type name for a fully-qualified protobuf name.
+//
+// The package path is folded into the name in upper camel case:
+// `.acme.orders.Order` becomes `AcmeOrdersOrder`.  That is uglier than
+// `Order` and it is not a preference — novo-lang keys struct identity
+// by NAME across the whole assembly, dependencies included, so two
+// generated trees that both declared `Order` could not be used by one
+// program (`docs/publishing.md` § Public type names are globally
+// unique).  The `.proto` file's own package is the disambiguator the
+// author already chose, so it is the one to use.
+//
+// ```novo
+// use pbgen
+//
+// fn main() [io]
+//     println(pbgen.novo_type_name(".acme.orders.Order"))   // AcmeOrdersOrder
+// ```
+pub fn novo_type_name(full_name: Str) -> Str []
+    todo("pbgen.novo_type_name")
+
+// The novo-lang field name for a `.proto` field name.
+//
+// The `.proto` name unchanged — protobuf's convention is already
+// snake case and novo-lang's is too — except for a name that is a
+// novo-lang reserved word, which takes a trailing underscore.
+// `then`, `loop` and `register` are the ones a real `.proto` file
+// meets.
+//
+// ```novo
+// use pbgen
+//
+// fn main() [io]
+//     let a = pbgen.novo_field_name("unit_price")
+//     let b = pbgen.novo_field_name("loop")
+//     println("${a} ${b}")   // unit_price loop_
+// ```
+pub fn novo_field_name(name: Str) -> Str []
+    todo("pbgen.novo_field_name")
+
+// The generated module name for a `.proto` file path.
+//
+// `acme/order.proto` becomes `acme_order`: the directories joined with
+// underscores, the extension dropped.  A module name is unique across
+// the assembly the same way a type name is, so the path is folded in
+// for the same reason.
+pub fn novo_module_name(file_name: Str) -> Str []
+    todo("pbgen.novo_module_name")
+
+// The generated enum variant name for one value of one enum.
+//
+// The enum's novo-lang name, then the value's name in upper camel case
+// with the enum's own prefix stripped when it has one:
+// `.acme.Currency`'s `CURRENCY_EUR` becomes `AcmeCurrencyEur`.  The
+// prefix strip is what protobuf's own style guide asks generators to
+// do, and the enum name is prepended because a VARIANT is resolved by
+// name across the assembly too — `Err(Transport(9))` binds whichever
+// `Transport` was declared first.
+pub fn novo_variant_name(enum_full_name: Str, value_name: Str) -> Str []
+    todo("pbgen.novo_variant_name")
+
+// The generated enum type name for a oneof.
+//
+// A oneof becomes an enum of its own, named for its message and
+// itself: `.acme.Order`'s `payment` oneof becomes `AcmeOrderPayment`.
+// The message's own struct holds it as `?AcmeOrderPayment`, because a
+// oneof with nothing set is the ordinary state.
+pub fn novo_oneof_type_name(message_full_name: Str, oneof_name: Str) -> Str []
+    todo("pbgen.novo_oneof_type_name")
+
+// The novo-lang type a scalar protobuf type generates as.
+//
+// `Int` for every integral type, `Float` for `double` and `float`,
+// `Bool` for `bool`, `Str` for `string`, `Bytes` for `bytes`.  Eight
+// integral types onto one `Int` is the honest mapping — novo-lang has
+// one integer type and it is sixty-four bits signed — and what it costs
+// is named in the README's limits: `uint64` above 2^63 is the same bits
+// read as a negative, and a generated round trip preserves it.
+//
+// ```novo
+// use pbgen
+// use pbwire
+//
+// fn main() [io]
+//     println(pbgen.novo_scalar_type(PbTypeSfixed32))   // Int
+// ```
+pub fn novo_scalar_type(t: PbFieldType) -> Str []
+    todo("pbgen.novo_scalar_type")
+
+// The whole novo-lang type a field generates as, presence and
+// repetition included.
+//
+// `[Int]` for a repeated `int32`; `?Str` for a `string` with presence;
+// `Str` for a proto3 singular `string` without it;
+// `[AcmeOrderTagsEntry]` for a `map<string, int32>` — a list of pairs,
+// which is the shape the README's contract section explains.
+pub fn novo_field_type(set: PbFileSet, f: PbField, syntax: PbSyntax) -> Str []
+    todo("pbgen.novo_field_type")
+
+// The novo-lang type name for a map field's pair struct.
+//
+// `.acme.Order`'s `tags` map becomes `AcmeOrderTagsEntry`, with fields
+// `key` and `value`.
+pub fn novo_map_entry_type_name(message_full_name: Str, field_name: Str) -> Str []
+    todo("pbgen.novo_map_entry_type_name")
+
+// Whether a word is one novo-lang reserves, so a generated identifier
+// must not be it.
+//
+// `then`, `loop` and `register` among them.  Published because the
+// generator is not the only thing that needs the list — a hand-written
+// wrapper around generated code needs the same answer.
+pub fn is_reserved_word(s: Str) -> Bool []
+    todo("pbgen.is_reserved_word")
+
+// ── what the generated code looks like, as facts ─────────────────────
+
+// The name of the generated function that encodes a message:
+// `encode_acme_order`.
+//
+// A free function rather than a method, because `impl` blocks on a
+// generated struct would put two of this package's decisions — the
+// trait and the method name — where a caller's own `impl` might want
+// to be.
+pub fn encode_fn_name(message_full_name: Str) -> Str []
+    todo("pbgen.encode_fn_name")
+
+// The name of the generated function that decodes one:
+// `decode_acme_order`.
+pub fn decode_fn_name(message_full_name: Str) -> Str []
+    todo("pbgen.decode_fn_name")
+
+// The name of the generated function that sizes one:
+// `encoded_len_acme_order`.
+//
+// Generated because the sizing pass is where the length prefix problem
+// is solved (`pbwrite` § the length prefix is the whole problem), and a
+// caller that wants to write into its own buffer needs the number
+// first.
+pub fn len_fn_name(message_full_name: Str) -> Str []
+    todo("pbgen.len_fn_name")
+
+// The name of the generated field that holds a message's unknown
+// fields: `unknown`.
+//
+// Every generated struct has one, and the generated encoder writes it
+// last.  A struct without it would be a struct that silently drops a
+// newer peer's fields, which is the failure this whole package is
+// arranged to prevent.
+pub fn unknown_field_name() -> Str []
+    todo("pbgen.unknown_field_name")

@@ -1,0 +1,68 @@
+[package]
+name        = "protobuf-nv"
+version     = "0.0.1"
+description = "Protocol Buffers on the wire: the four wire types as tag arithmetic over a caller's buffer, a feed-and-drain reader that keeps the fields it does not know, a writer that back-patches its own lengths, FileDescriptorProto as novo-lang values parsed out of a descriptor set, a dynamic message addressed by field number, and the code generator's contract as a signature.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: arithmetic over bytes the caller already holds.  No function
+# declares an effect.  A `.proto` file is read by the host and handed
+# in as bytes; a generated file is answered as text and written by the
+# host; nothing here opens anything.
+#
+# NO DEVICE CLAIM, and the README says why rather than leaving a reader
+# to wonder: every varint on this wire is leb128-nv's, that package's
+# surface is `Cursor`- and `Bytes`-shaped, and neither links at
+# `@tier(embedded)`.  A probe would mean a second varint inside this
+# package, which is the one thing the grid's row for protobuf-nv asks
+# it not to do.  cbor-nv is the binary encoding the embedded tier has,
+# and it says so in its own README.
+layer       = "core"
+
+category    = "encoding"
+
+tags = ["protobuf", "proto3", "wire-format", "grpc", "codegen", "descriptor", "sans-io"]
+repository  = "https://github.com/novolang/protobuf-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "The wire under gRPC, and the descriptors that describe it"
+
+[dependencies]
+# leb128-nv is protocol buffers' varint, exactly and without
+# adaptation: base-128, little-endian groups, the top bit of every byte
+# but the last set.  The encoding § 4 of the protobuf specification
+# describes IS DWARF's LEB128, so a second copy inside this package
+# would be a second copy of a published package rather than a port of
+# anything.
+leb128-nv = "^0.1.5"
+
+# zigzag-nv is the `sint32` and `sint64` fold, and only those two.
+# `int32` and `int64` are NOT zigzagged — a negative `int32` is
+# sign-extended to sixty-four bits and spends ten bytes, which is the
+# encoding's best-known wart and the reason `sint32` exists at all.
+# `pbwire.encode_sint32_into` is the fold named at the call site so
+# that the choice is visible in the code rather than in a comment.
+zigzag-nv = "^0.1.4"
+
+# varint-nv is the two composed — zigzag, then LEB128 — which is
+# `sint64` in one call.  It is here so that the `sint` path is one
+# function rather than two, and it costs nothing extra: varint-nv's own
+# dependencies are the two above.
+varint-nv = "^0.1.4"
+
+# NOT a JSON package.  Protobuf's JSON mapping is a separate
+# specification with its own field-name casing, its own base64 rule for
+# `bytes`, and its own well-known-type spellings, and doing half of it
+# would be worse than not claiming it.  The README's "what is not here"
+# names it.

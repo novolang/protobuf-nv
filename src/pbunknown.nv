@@ -1,0 +1,132 @@
+// pbunknown — the fields this program does not know, kept whole.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY A MODULE FOR THIS.  Preserving unknown fields is the single
+// behaviour that makes protobuf's compatibility story true rather than
+// aspirational, and it is the one almost every hand-written codec
+// leaves out.  A service built against version 3 of a `.proto` file
+// that reads a version 4 message, changes one field and writes it back
+// MUST send version 4's other fields on, unchanged, or the version 4
+// service at the far end sees them disappear — a data loss that nothing
+// logs and nobody notices until a field that was set is not.
+//
+// WHAT IS KEPT.  The raw bytes, key included, exactly as they arrived
+// and in the order they arrived.  Not the decoded value: a field whose
+// type this program does not know cannot be decoded, only copied, and
+// re-encoding a value this program understood differently is how the
+// bytes stop matching a signature computed over them.
+//
+// ORDER IS PRESERVED AND IT MATTERS.  Protobuf's field order is not
+// semantically significant and is observably significant anyway: a
+// message that round-trips through this package byte for byte is a
+// message whose signature still verifies.  `write_into` emits the kept
+// fields in arrival order, after the known fields, which is what every
+// other implementation does.
+//
+// THIS IS NOT A MAP.  Two arrivals of the same unknown field number are
+// two entries, because a repeated field is exactly that on the wire and
+// the reader does not know which of them this one is.
+
+use std.bytes
+use pbwire
+
+// One field that arrived and was not recognised: its tag, and the raw
+// bytes it occupied.
+pub struct PbUnknown
+    // The tag as it was read.  The field number is what a later
+    // version of the schema will match on.
+    tag: PbTag
+    // The field's bytes, KEY INCLUDED, exactly as they arrived.  Key
+    // included rather than payload only, because a group spans two keys
+    // and a payload-only form would have nowhere to put the second.
+    raw: Bytes
+
+// The kept fields of one message, in arrival order.
+//
+// An ordinary struct rather than a `@value` one: it owns a list of
+// `Bytes`, which is a heap allocation per entry, and the type exists to
+// carry exactly that.
+pub struct PbUnknownSet
+    fields: [PbUnknown]
+
+// An empty set — what a message with nothing unknown in it carries.
+//
+// ```novo
+// use pbunknown
+//
+// fn main() [io]
+//     println("${pbunknown.count(pbunknown.empty())}")   // 0
+// ```
+pub fn empty() -> PbUnknownSet []
+    todo("pbunknown.empty")
+
+// Add one field's bytes to the set, at the end.
+//
+// `raw` is the whole field including its key, which is what
+// `pbread.PbFieldSeen` hands over and what `pbwire.skip_at` measures.
+pub fn keep(u: PbUnknownSet, t: PbTag, raw: Bytes) -> PbUnknownSet []
+    todo("pbunknown.keep")
+
+// How many fields the set holds.
+pub fn count(u: PbUnknownSet) -> Int []
+    todo("pbunknown.count")
+
+// The kept fields, in arrival order.
+pub fn fields_of(u: PbUnknownSet) -> [PbUnknown] []
+    todo("pbunknown.fields_of")
+
+// Every kept field whose number is `field`, in arrival order.
+//
+// A repeated unknown field arrives more than once, so this answers a
+// list; `count` on the result is how many times.
+pub fn by_number(u: PbUnknownSet, field: Int) -> [PbUnknown] []
+    todo("pbunknown.by_number")
+
+// Whether the set holds anything with this field number.
+pub fn has_number(u: PbUnknownSet, field: Int) -> Bool []
+    todo("pbunknown.has_number")
+
+// Drop every field with this number.
+//
+// What a program that has LEARNED a field calls: a version 4 reader
+// upgrading a message it kept as version 3 takes the bytes out of the
+// set once it has decoded them, so they are not written twice.
+pub fn drop_number(u: PbUnknownSet, field: Int) -> PbUnknownSet []
+    todo("pbunknown.drop_number")
+
+// Append `b`'s fields to `a`'s, in that order.
+//
+// Protobuf's merge rule is concatenation, so merging two messages
+// merges their unknown sets the same way and needs no reconciliation.
+pub fn merge(a: PbUnknownSet, b: PbUnknownSet) -> PbUnknownSet []
+    todo("pbunknown.merge")
+
+// How many bytes the whole set occupies when it is written back out.
+//
+// The sum of the kept `raw` lengths, and nothing else: the bytes are
+// copied, not re-encoded, so the size is known exactly rather than
+// estimated.
+pub fn encoded_len(u: PbUnknownSet) -> Int []
+    todo("pbunknown.encoded_len")
+
+// Write the kept fields into the caller's buffer, in arrival order, and
+// answer the byte count.
+//
+// `PbBufferTooSmall` when the cursor has less room than `encoded_len`
+// asks for; nothing here allocates and nothing here grows.
+//
+// ```novo
+// use std.bytes
+// use pbunknown
+//
+// fn main() [io]
+//     let u = pbunknown.empty()
+//     var c = bytes.cursor_le(bytes.zeros(pbunknown.encoded_len(u)))
+//     match pbunknown.write_into(u, c)
+//         Ok(n)  => println("${n}")   // 0
+//         Err(e) => println(e.message())
+// ```
+pub fn write_into(u: PbUnknownSet, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbunknown.write_into")

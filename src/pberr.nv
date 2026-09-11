@@ -1,0 +1,217 @@
+// pberr — every way a protobuf message, a descriptor set or a generated
+// file can refuse to be read or written.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// THREE TYPES, BECAUSE THERE ARE THREE AUDIENCES
+//
+// `PbDecodeError` is "these bytes are not this message".  It is the
+// only one of the three a network peer can cause, so it is the one
+// that carries a byte offset on every variant: a protobuf deployment
+// is a dozen services built from four generators, and the question a
+// person has is always which byte the disagreement starts at.
+//
+// `PbEncodeError` is "you asked me to write something the wire cannot
+// carry" — a field number of zero, a length that does not fit the
+// buffer the caller supplied, a `Str` that is not UTF-8.  That is the
+// calling program's fault, it has no offset into anything that
+// arrived, and a caller matching one enum for both would be writing
+// arms it can never reach.
+//
+// `PbSchemaError` is "this descriptor set does not describe a
+// program" — a field whose type name resolves to nothing, a map entry
+// that is not a two-field message, a oneof index past the end of the
+// list.  It is what the code generator refuses on, and it names a
+// PATH through the descriptor rather than an offset, because by the
+// time the generator runs the bytes are gone.
+//
+// NONE OF THEM MEANS "WAIT FOR MORE BYTES".  That is `pbread.PbStep`'s
+// `need` and an empty event list, which on a socket is the ordinary
+// case and not a fault.
+
+// PbDecodeError is why a byte string is not the message it was read as.
+//
+// Every variant carries `at`, the offset from the first byte the
+// reader was given.  A reader fed in chunks counts from the start of
+// the message rather than from the start of the chunk, which is what
+// makes two logs from two ends of a connection comparable.
+pub enum PbDecodeError
+    // The input ended in the middle of something: `need` more bytes
+    // would have finished it, when that is known, and 1 when it is not
+    // (a varint has no announced length).
+    PbTruncated(at: Int, need: Int)
+    // A varint ran past ten bytes, or its tenth byte set a bit above
+    // the sixty-fourth.  Both are the same fault to a caller and a
+    // different one to a fuzzer, so the byte count is carried.
+    PbVarintOverflow(at: Int, bytes: Int)
+    // The low three bits of a key named 6 or 7, which the wire format
+    // does not define and never will — they are the two values left
+    // over from the four types and the two group markers.
+    PbUnknownWireType(at: Int, wire: Int)
+    // A key whose field number was zero.  Field 0 is not a field; a
+    // zero key is the most common way a decoder discovers it is reading
+    // something that is not protobuf at all.
+    PbZeroFieldNumber(at: Int)
+    // A field number above 536,870,911, which is what twenty-nine bits
+    // of key leave after the three wire-type bits.
+    PbFieldNumberTooLarge(at: Int, field: Int)
+    // A length-delimited field announced more bytes than the message
+    // has left.  `len` is what it asked for and `left` is what there
+    // was.
+    PbLengthOverrun(at: Int, len: Int, left: Int)
+    // A length-delimited field announced a length that does not fit a
+    // signed integer, which is a varint with the high bit of the
+    // sixty-fourth set read as a length.
+    PbLengthNotRepresentable(at: Int)
+    // Nesting went past the reader's limit.  Protobuf's recursion is
+    // unbounded by specification and every implementation bounds it
+    // anyway; `pbread.default_limits` is where the number is.
+    PbDepthExceeded(at: Int, limit: Int)
+    // An end-group key named a field number no open group has.  Groups
+    // are proto2's and are still on the wire in front of a great deal
+    // of deployed software, so they are read rather than refused.
+    PbGroupMismatch(at: Int, closed: Int, open: Int)
+    // The message ended with a group still open.
+    PbUnclosedGroup(at: Int, field: Int)
+    // A `string` field held bytes that are not UTF-8.  `bytes` is the
+    // field for arbitrary octets, and a decoder that let this through
+    // would hand a caller a `Str` whose length nobody agrees on.
+    PbNotUtf8(at: Int, byte: Int)
+    // A packed repeated field's payload did not divide into whole
+    // elements: a `fixed32` packed field of six bytes, or a packed
+    // varint field whose last varint is unterminated.
+    PbPackedRemainder(at: Int, left: Int)
+    // The message was longer than the reader's byte limit.  A limit
+    // exists because a length-delimited field is an allocation
+    // instruction from whoever sent it.
+    PbMessageTooLarge(at: Int, len: Int, limit: Int)
+    // The whole input was consumed as a message and bytes were left
+    // over.  Only `decode` raises it; `decode_prefix` answers the
+    // length instead.
+    PbTrailingBytes(at: Int, left: Int)
+    // A dynamic decode named a message type the descriptor set does not
+    // declare.  `at` is 0, because the fault is in the request and not
+    // in any byte that arrived — and the variant is here rather than in
+    // `PbSchemaError` so that a caller in the decode path matches one
+    // enum instead of two.
+    PbNoSuchType(at: Int, name: Str)
+
+// message renders the refusal as one line of prose, with the offset in
+// it.
+//
+// `Result<_, PbDecodeError>` requires this impl: SPEC § 3.4 admits a
+// `Result` error type only if it implements `Error`.
+impl Error for PbDecodeError
+    // Answer the one-line report: what was wrong, and where.
+    //
+    // ```novo
+    // use pberr
+    //
+    // fn main() [io]
+    //     let e = PbZeroFieldNumber(at: 4)
+    //     println(e.message())
+    //     // protobuf: field number 0 at byte 4 — 0 is not a field number
+    // ```
+    fn message(self) -> Str
+        todo("pberr.PbDecodeError.message")
+
+// The byte a decode refusal stopped at, counted from the first byte of
+// the message.
+//
+// Every variant has one, so this is total and needs no sentinel — which
+// is the difference between this enum and the two below.
+//
+// ```novo
+// use pberr
+//
+// fn main() [io]
+//     println("${pberr.decode_offset(PbTruncated(at: 12, need: 3))}")   // 12
+// ```
+pub fn decode_offset(e: PbDecodeError) -> Int []
+    todo("pberr.decode_offset")
+
+// PbEncodeError is why a message this package was asked to write would
+// not have been legal protobuf.
+pub enum PbEncodeError
+    // A field number outside `1 ..= 536870911`.
+    PbBadFieldNumber(field: Int)
+    // A field number in `19000 ..= 19999`, which the descriptor
+    // language reserves for its own use and no `.proto` file may
+    // declare.  Refused on the way out rather than on the way in: a
+    // peer that sends one is somebody else's bug, and a program that
+    // writes one is this program's.
+    PbReservedFieldNumber(field: Int)
+    // The caller's buffer had `left` bytes and the value needed `need`.
+    // Every `_into` function answers this rather than growing anything.
+    PbBufferTooSmall(need: Int, left: Int)
+    // A `string` field was handed bytes that are not UTF-8.
+    PbEncodeNotUtf8(field: Int, at: Int)
+    // A value outside the range its declared type can carry — a
+    // `uint32` above 2^32 - 1, an `sfixed32` below -2^31.
+    PbValueOutOfRange(field: Int, value: Int)
+    // A submessage was nested deeper than the writer's limit.  The same
+    // bound as the reader's, for the same reason.
+    PbEncodeDepthExceeded(limit: Int)
+
+// message renders the refusal as one line of prose.
+impl Error for PbEncodeError
+    // Answer the one-line report.  There is no offset: nothing
+    // arrived, so there is nothing to point at but the field number.
+    fn message(self) -> Str
+        todo("pberr.PbEncodeError.message")
+
+// PbSchemaError is why a descriptor set does not describe a program
+// that could be generated.
+//
+// Every variant names a PATH — `"acme.Order.items"` — rather than an
+// offset, because the generator runs long after the bytes are gone and
+// a path is what a person can find in a `.proto` file.
+pub enum PbSchemaError
+    // A field's `type_name` named a message or enum the set does not
+    // contain, and no import supplies it.
+    PbUnresolvedTypeName(path: Str, name: Str)
+    // Two fields of one message declared the same number.
+    PbDuplicateFieldNumber(path: Str, field: Int)
+    // Two fields of one message, or two values of one enum, declared
+    // the same name.
+    PbDuplicateName(path: Str, name: Str)
+    // A field's `oneof_index` pointed past the message's oneof list.
+    PbOneofIndexOutOfRange(path: Str, index: Int)
+    // A message marked `map_entry` was not the two-field shape a map
+    // entry has: field 1 the key, field 2 the value, both singular.
+    PbBadMapEntry(path: Str)
+    // A map's key field was a type protobuf does not allow as a key —
+    // anything floating point, `bytes`, a message or an enum.
+    PbBadMapKeyType(path: Str, type_name: Str)
+    // A proto3 file used a construct proto3 does not have: a group, a
+    // required field, a default value.
+    PbNotInProto3(path: Str, what: Str)
+    // The file's `syntax` was neither `"proto2"` nor `"proto3"`.  An
+    // edition is refused here rather than guessed at; the README says
+    // what is in.
+    PbUnknownSyntax(path: Str, syntax: Str)
+    // A field number in the reserved `19000 ..= 19999` range, or one
+    // the message's own `reserved` statement excludes.
+    PbReservedInSchema(path: Str, field: Int)
+
+// message renders the refusal as one line of prose, with the path in
+// it.
+impl Error for PbSchemaError
+    // Answer the one-line report: which declaration, and what is wrong
+    // with it.
+    fn message(self) -> Str
+        todo("pberr.PbSchemaError.message")
+
+// The dotted path a schema refusal names, or `""` for the two variants
+// that are about a whole file.
+//
+// ```novo
+// use pberr
+//
+// fn main() [io]
+//     let e = PbDuplicateFieldNumber(path: "acme.Order", field: 3)
+//     println(pberr.schema_path(e))   // acme.Order
+// ```
+pub fn schema_path(e: PbSchemaError) -> Str []
+    todo("pberr.schema_path")

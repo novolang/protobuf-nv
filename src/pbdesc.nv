@@ -1,0 +1,480 @@
+// pbdesc — what a `.proto` file says, as novo-lang values.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHERE THESE VALUES COME FROM.  Not from a `.proto` file: from a
+// DESCRIPTOR SET, the binary `FileDescriptorSet` that `protoc
+// --descriptor_set_out` writes and that every gRPC reflection service
+// serves.  A descriptor set is itself a protobuf message, so parsing
+// one needs nothing but `pbread` — which is the property that makes
+// this package able to describe messages without a text parser at all.
+//
+// A `.proto` TEXT PARSER IS A SEPARATE PACKAGE, and the reason is worth
+// stating rather than leaving as an omission.  The text grammar is
+// nearly the whole of protobuf's surface — imports and import paths,
+// nested option syntax, custom options that are themselves extensions,
+// editions, reserved statements, three kinds of comment with a
+// documented attachment rule — and none of it appears on the wire.  A
+// package that did both would be two packages sharing a name, and the
+// half that matters for reading bytes would carry the half that does
+// not.
+//
+// THE SHAPE MIRRORS descriptor.proto, DELIBERATELY.  `PbMessage` nests
+// `PbMessage` because `DescriptorProto` nests `DescriptorProto`, and
+// the field names are the same names.  A reader checking this port
+// against Google's own `descriptor.proto` should be able to do it line
+// by line; a tidier arrangement of our own would have to be checked
+// against nothing.
+//
+// READING AND CHECKING ARE TWO JOBS.  `parse_file_set` answers what the
+// bytes said — a `PbDecodeError` when they are not a descriptor set at
+// all.  `validate` answers whether what they said describes a program —
+// a list of `PbSchemaError`, which may be long, because a person fixing
+// a schema wants every complaint at once rather than one per run.
+
+use std.bytes
+use pbread
+
+// Which syntax a file declares.
+//
+// WHAT IS IN, precisely, because "supports proto3" is not a claim
+// anyone can check:
+//
+//   proto3, whole.  Singular fields with implicit presence, `optional`
+//   with explicit presence (the `proto3_optional` flag), packed
+//   repeated by default, open enums, maps, oneofs, `reserved`.
+//
+//   proto2 ON THE WIRE, whole: groups, `required`, `optional` with
+//   explicit presence, unpacked repeated by default, closed enums,
+//   extension ranges read as ranges.  Every proto2 message can be read
+//   and written by this package.
+//
+//   proto2 IN THE GENERATOR, partly.  `pbgen` will not generate for a
+//   file with extensions in it: an extension is a field declared
+//   outside the message that carries it, which needs a registry the
+//   generated code consults at run time, and that is a design decision
+//   of its own rather than a line of code.  `PbNotInProto3` and
+//   `pbgen`'s refusal list name it.
+//
+//   EDITIONS ARE NOT IN.  A file whose `syntax` is `"editions"` is
+//   `PbUnknownSyntax`.  The feature-resolution rules are a
+//   specification of their own, they change what every field's
+//   presence and packing mean, and guessing at them would produce a
+//   generator whose output is wrong in a way nothing shows.
+pub enum PbSyntax
+    // `syntax = "proto2";`, and a file with no `syntax` statement at
+    // all — which is what the specification says an absent one means.
+    PbProto2
+    // `syntax = "proto3";`
+    PbProto3
+
+// The name a file's `syntax` statement carries: `"proto2"` or
+// `"proto3"`.
+pub fn syntax_name(s: PbSyntax) -> Str []
+    todo("pbdesc.syntax_name")
+
+// The syntax a name declares, or `None` for anything else —
+// `"editions"` included.
+pub fn syntax_of_name(name: Str) -> ?PbSyntax []
+    todo("pbdesc.syntax_of_name")
+
+// How many times a field may appear.
+pub enum PbLabel
+    // At most once.  In proto2 that is explicit presence; in proto3 it
+    // is implicit presence unless the field also carries
+    // `proto3_optional`.
+    PbLabelOptional
+    // Exactly once — proto2 only, and the feature proto3 removed
+    // because a required field cannot ever be taken out again.
+    PbLabelRequired
+    // Any number of times.
+    PbLabelRepeated
+
+// A closed range of field numbers, both ends included.
+//
+// What `reserved 2 to 5;` and `extensions 100 to 199;` each carry.
+pub struct PbNumberRange
+    first: Int
+    last: Int
+
+// One field of one message.
+//
+// The field names are `FieldDescriptorProto`'s, so this struct can be
+// checked against `descriptor.proto` rather than against this package.
+pub struct PbField
+    // The name as the `.proto` file wrote it: `unit_price`.
+    name: Str
+    // The name protobuf's JSON mapping uses, `unitPrice` — from the
+    // descriptor when it carries one, and `default_json_name` when it
+    // does not.
+    json_name: Str
+    // `1 ..= 536870911`, outside the reserved range.
+    number: Int
+    label: PbLabel
+    // Which of the eighteen declared types.
+    field_type: PbFieldType
+    // The fully-qualified name a `message` or `enum` field points at,
+    // leading dot included: `.acme.Money`.  `""` for a scalar.
+    type_name: Str
+    // The index into the message's `oneofs`, or -1 when the field is
+    // not in one.
+    oneof_index: Int
+    // Whether the descriptor said `[packed = true]` or
+    // `[packed = false]` — `packed_of` is the function that resolves
+    // this against the syntax's default, and is what a reader should
+    // call.
+    packed_set: Bool
+    packed_value: Bool
+    // proto3's `optional` keyword: the field is in a synthetic oneof of
+    // its own, which is how proto3 gives a singular field explicit
+    // presence.  `oneof_index` points at that synthetic oneof, and a
+    // generator must not emit it as a user-visible oneof.
+    proto3_optional: Bool
+    // proto2's `[default = ...]`, exactly as the `.proto` file wrote
+    // it, unparsed.  `""` when there is none.  Unparsed because the
+    // text's meaning depends on the field's type — `"1"` is an integer
+    // here and a string there — and parsing it belongs with the type.
+    default_value: Str
+    // `[deprecated = true]`.
+    deprecated: Bool
+
+// One oneof of one message: a set of fields at most one of which is
+// set.
+pub struct PbOneof
+    name: Str
+    // True when the compiler made this oneof to carry a single
+    // proto3 `optional` field rather than the `.proto` file declaring
+    // it.  A generator emits presence for the field and no enum for
+    // the oneof.
+    synthetic: Bool
+
+// One value of one enum.
+pub struct PbEnumValue
+    name: Str
+    number: Int
+    deprecated: Bool
+
+// One enum.
+pub struct PbEnum
+    // The simple name: `Currency`.
+    name: Str
+    // The fully-qualified name, leading dot included: `.acme.Currency`.
+    full_name: Str
+    values: [PbEnumValue]
+    // `option allow_alias = true;` — two names for one number, which is
+    // refused unless the file asks for it.
+    allow_alias: Bool
+    // proto3 requires the first value to be zero, and a generator needs
+    // to know which value that is because it is the default.
+    zero_value: Str
+    deprecated: Bool
+    // Every option this package does not name, kept whole.
+    unknown: PbUnknownSet
+
+// One message.
+//
+// `nested` holds `PbMessage` because `DescriptorProto.nested_type`
+// holds `DescriptorProto`: the shape is the reference's, so the port is
+// checkable against it.
+pub struct PbMessage
+    // The simple name: `Order`.
+    name: Str
+    // The fully-qualified name, leading dot included: `.acme.Order`.
+    full_name: Str
+    fields: [PbField]
+    oneofs: [PbOneof]
+    nested: [PbMessage]
+    enums: [PbEnum]
+    // proto2's `extensions 100 to 199;`.  Read and carried; `pbgen`
+    // refuses to generate for a file that has any.
+    extension_ranges: [PbNumberRange]
+    // `reserved 2 to 5;` — numbers no future version may reuse.
+    reserved_ranges: [PbNumberRange]
+    // `reserved "old_name";`
+    reserved_names: [Str]
+    // `options.map_entry` — set by the compiler, never by a person, on
+    // the two-field message it invents for every `map<K, V>` field.
+    // `is_map_field` is what a caller should ask; this is the raw flag.
+    map_entry: Bool
+    deprecated: Bool
+    // Every option this package does not name, kept whole.
+    unknown: PbUnknownSet
+
+// How a method streams.
+//
+// The four combinations of two booleans, named, because "client
+// streaming and not server streaming" is not how anyone says it.
+pub enum PbStreaming
+    // One request, one response.
+    PbUnary
+    // One request, a stream of responses.
+    PbServerStream
+    // A stream of requests, one response.
+    PbClientStream
+    // Both directions stream, independently.
+    PbBidiStream
+
+// One method of one service.
+pub struct PbMethod
+    name: Str
+    // The fully-qualified name of the request message, leading dot
+    // included.
+    input_type: Str
+    // The fully-qualified name of the response message.
+    output_type: Str
+    streaming: PbStreaming
+    deprecated: Bool
+    unknown: PbUnknownSet
+
+// One service.
+pub struct PbService
+    // The simple name: `Orders`.
+    name: Str
+    // The fully-qualified name, leading dot included: `.acme.Orders`.
+    full_name: Str
+    methods: [PbMethod]
+    deprecated: Bool
+    unknown: PbUnknownSet
+
+// The options of one file that this package names.
+//
+// A deliberately short list.  Protobuf's options are themselves a
+// message and a custom option is an extension of it, so naming them all
+// would mean shipping an extension registry; `unknown` keeps every
+// option this struct does not name, byte for byte, so a caller with
+// its own extension can find it.
+pub struct PbFileOptions
+    // `option deprecated = true;`
+    deprecated: Bool
+    // `option go_package`, `option java_package`: carried because a
+    // generator that ignores them produces files that collide.  `""`
+    // when absent.
+    go_package: Str
+    java_package: Str
+    // Everything else, kept whole.
+    unknown: PbUnknownSet
+
+// One `.proto` file's declarations.
+pub struct PbFile
+    // The path the compiler was given: `acme/order.proto`.
+    name: Str
+    // `package acme.orders;`, or `""`.
+    package: Str
+    syntax: PbSyntax
+    // The paths of the files this one imports, in declaration order.
+    dependency: [Str]
+    // The indices into `dependency` of the imports declared
+    // `public` — an import a file's own importers also get.
+    public_dependency: [Int]
+    messages: [PbMessage]
+    enums: [PbEnum]
+    services: [PbService]
+    options: PbFileOptions
+
+// A whole descriptor set: every file, with its imports.
+//
+// A set is self-contained by construction — `protoc` writes the
+// transitive closure — so every `type_name` in it resolves inside it,
+// and `validate` says so when one does not.
+pub struct PbFileSet
+    files: [PbFile]
+
+// ── reading one ──────────────────────────────────────────────────────
+
+// Parse a binary `FileDescriptorSet`.
+//
+// The bytes are what `protoc --descriptor_set_out` writes and what a
+// gRPC reflection service serves, so a program can describe a service
+// it has never been compiled against.
+//
+// Answers a decode refusal only: a set that parses but does not
+// describe a program is `validate`'s answer, because a caller reading
+// a set to LOOK SOMETHING UP does not need it to be generatable.
+//
+// ```novo
+// use std.bytes
+// use pbdesc
+// use pbread
+//
+// fn main() [io]
+//     let empty = bytes.zeros(0)
+//     match pbdesc.parse_file_set(empty, pbread.default_limits())
+//         Ok(s)  => println("${s.files.len()}")   // 0
+//         Err(e) => println(e.message())
+// ```
+pub fn parse_file_set(src: Bytes, limits: PbLimits) -> Result<PbFileSet, PbDecodeError> []
+    todo("pbdesc.parse_file_set")
+
+// Parse a single binary `FileDescriptorProto`.
+//
+// What a reflection service answers one file at a time.  A file parsed
+// alone cannot resolve names its imports declare, so `validate` on a
+// set of one will say so; that is information rather than a fault.
+pub fn parse_file(src: Bytes, limits: PbLimits) -> Result<PbFile, PbDecodeError> []
+    todo("pbdesc.parse_file")
+
+// Write a descriptor set back out as a binary `FileDescriptorSet`.
+//
+// Round-tripping matters because a tool that reads a set, adds a file
+// and writes it is the ordinary way build systems assemble one.  The
+// kept `unknown` fields travel, which is what makes the round trip
+// byte-stable for the options this struct does not name.
+pub fn write_file_set(set: PbFileSet) -> Result<Bytes, PbEncodeError> []
+    todo("pbdesc.write_file_set")
+
+// ── checking one ─────────────────────────────────────────────────────
+
+// Every way this set fails to describe a program, all at once.
+//
+// An empty list is a set a generator will accept.  A long list is a
+// person's afternoon, and handing it over in one go rather than one
+// complaint per run is the difference between a tool and a game.
+//
+// ```novo
+// use pbdesc
+//
+// fn main() [io]
+//     println("${pbdesc.validate(PbFileSet { files: [] }).len()}")   // 0
+// ```
+pub fn validate(set: PbFileSet) -> [PbSchemaError] []
+    todo("pbdesc.validate")
+
+// ── looking things up ────────────────────────────────────────────────
+
+// The message a fully-qualified name points at, nested messages
+// included.
+//
+// The name carries its leading dot, `.acme.Order`, which is how
+// `PbField.type_name` writes it — so a lookup from a field is the
+// field's own string and no surgery.
+pub fn find_message(set: PbFileSet, full_name: Str) -> ?PbMessage []
+    todo("pbdesc.find_message")
+
+// The enum a fully-qualified name points at.
+pub fn find_enum(set: PbFileSet, full_name: Str) -> ?PbEnum []
+    todo("pbdesc.find_enum")
+
+// The service a fully-qualified name points at.
+pub fn find_service(set: PbFileSet, full_name: Str) -> ?PbService []
+    todo("pbdesc.find_service")
+
+// The method a service declares under this name.
+pub fn find_method(s: PbService, name: Str) -> ?PbMethod []
+    todo("pbdesc.find_method")
+
+// The field with this number, or `None`.
+//
+// What a decoder calls once per field it reads, so it is the hot
+// lookup in every dynamic path.
+pub fn field_by_number(m: PbMessage, number: Int) -> ?PbField []
+    todo("pbdesc.field_by_number")
+
+// The field with this name.
+pub fn field_by_name(m: PbMessage, name: Str) -> ?PbField []
+    todo("pbdesc.field_by_name")
+
+// The field with this JSON name — which is the `json_name` the
+// descriptor carries, and not the `.proto` name.
+pub fn field_by_json_name(m: PbMessage, name: Str) -> ?PbField []
+    todo("pbdesc.field_by_json_name")
+
+// Every field belonging to the oneof at `index`.
+pub fn oneof_fields(m: PbMessage, index: Int) -> [PbField] []
+    todo("pbdesc.oneof_fields")
+
+// Every message the set declares, nested ones flattened, in declaration
+// order.
+//
+// What a generator walks.  The tree is the shape the reference has and
+// the list is the shape a generator wants, so both are here rather than
+// every caller writing the same recursion.
+pub fn all_messages(f: PbFile) -> [PbMessage] []
+    todo("pbdesc.all_messages")
+
+// ── the rules that are not in any one field ──────────────────────────
+
+// Whether a repeated field is packed: the descriptor's flag when it set
+// one, and the syntax's default when it did not.
+//
+// The two-field `packed_set` / `packed_value` pair exists precisely so
+// that this function can tell "the file said `false`" from "the file
+// said nothing", which in proto3 are opposite answers.
+//
+// ```novo
+// use pbdesc
+//
+// fn main() [io]
+//     let xs = PbField { name: "xs", json_name: "xs", number: 1,
+//         label: PbLabelRepeated, field_type: PbTypeInt32, type_name: "",
+//         oneof_index: 0 - 1, packed_set: false, packed_value: false,
+//         proto3_optional: false, default_value: "", deprecated: false }
+//     let on = pbdesc.packed_of(xs, PbProto3)
+//     println("${on}")   // true
+// ```
+pub fn packed_of(f: PbField, syntax: PbSyntax) -> Bool []
+    todo("pbdesc.packed_of")
+
+// Whether a field can tell "set to the default" from "not set".
+//
+// Every proto2 field has presence.  In proto3 a singular scalar does
+// NOT — a zero and an absent field are the same bytes, which is the
+// change proto3 made and the one that surprises people — unless the
+// field is in a oneof, carries `optional`, or is a message.  A
+// generator emits an `?T` for a field with presence and a `T` for one
+// without, and getting this wrong is how a generated struct loses
+// information.
+pub fn has_presence(f: PbField, syntax: PbSyntax) -> Bool []
+    todo("pbdesc.has_presence")
+
+// Whether this field is a `map<K, V>`: repeated, of a message type,
+// and that message is a compiler-generated map entry.
+//
+// A map is not a wire type.  It is sugar for a repeated message of two
+// fields, and every implementation has to know that; a reader that did
+// not would hand a caller a list of two-field structs and be correct
+// and useless.
+pub fn is_map_field(set: PbFileSet, f: PbField) -> Bool []
+    todo("pbdesc.is_map_field")
+
+// The key field of a map field's entry message: field number 1.
+//
+// `None` when the field is not a map.  A map key may be any integral
+// type, `bool` or `string`, and nothing else — `validate` is where a
+// set that says otherwise is refused.
+pub fn map_key_field(set: PbFileSet, f: PbField) -> ?PbField []
+    todo("pbdesc.map_key_field")
+
+// The value field of a map field's entry message: field number 2.
+pub fn map_value_field(set: PbFileSet, f: PbField) -> ?PbField []
+    todo("pbdesc.map_value_field")
+
+// The JSON name protobuf derives from a `.proto` name: lower camel
+// case, with each underscore removed and the letter after it upper
+// cased.
+//
+// `unit_price` becomes `unitPrice`.  Used when a descriptor carries no
+// `json_name`, which older ones do not.
+//
+// ```novo
+// use pbdesc
+//
+// fn main() [io]
+//     println(pbdesc.default_json_name("unit_price"))   // unitPrice
+// ```
+pub fn default_json_name(name: Str) -> Str []
+    todo("pbdesc.default_json_name")
+
+// Whether a name is one of the thirteen well-known types — `.google.
+// protobuf.Timestamp`, `.google.protobuf.Duration`, `.google.protobuf.
+// Any`, the wrappers, `Empty`, `Struct`, `Value`, `ListValue`,
+// `FieldMask`.
+//
+// They are ordinary messages on the wire and the generator emits them
+// as ordinary structs; this function exists so that a caller who wants
+// to map `Timestamp` onto calendar-nv's civil types can find them.
+// Doing that mapping is NOT this package's job — a `core` package has
+// no calendar, and a generator that quietly changed a field's type
+// would produce code nobody can match to the `.proto` file.
+pub fn is_well_known(full_name: Str) -> Bool []
+    todo("pbdesc.is_well_known")

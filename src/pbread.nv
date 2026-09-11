@@ -1,0 +1,279 @@
+// pbread — one message, read field by field, with no schema and no
+// buffer the caller did not give.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// THE SHAPE IS FEED AND DRAIN.  The host pumps chunks in and takes
+// finished fields out (`docs/publishing.md` § How a `core` package
+// takes bytes from its host).  That is right here because a protobuf
+// field is small and a message is read strictly left to right — there
+// is no index, no back-reference and nothing to seek to.
+//
+// A MESSAGE IS NOT SELF-DELIMITING, which is the fact that shapes this
+// whole module.  There is no header, no length and no end marker: a
+// message ends where its bytes end, and something outside the format
+// has to say where that is.  gRPC says it with a five-byte frame,
+// a file says it with its own length prefix, a field says it with the
+// length-delimited wire type.  So this reader reads UNTIL THE HOST SAYS
+// STOP — `finish` is that statement — and `feed` never announces a
+// message boundary it cannot see.
+//
+// WHY THE EVENTS CARRY NO FIELD NAMES.  This module has no schema.  A
+// length-delimited field is a string, a byte string, a submessage or a
+// packed repeated field, and only a `.proto` file knows which; a varint
+// is any of eight declared types.  So the events carry the wire shape
+// and the raw bytes, and `pbdyn` is the module that puts a descriptor
+// over them.  A caller with a generated struct does the same thing with
+// generated code.
+//
+// WHAT IT REFUSES, AND WHAT IT KEEPS.  It refuses what is not protobuf
+// at all — wire codes 6 and 7, a zero field number, a varint past ten
+// bytes, a length past the end, nesting past the limit.  It keeps
+// everything else, including field numbers in the descriptor
+// language's reserved range: a peer's mistake is not a reason to drop a
+// connection, and `pbwrite` is where writing one is refused.
+
+use std.bytes
+use pbunknown
+
+// What a reader will not do, whatever it is asked.
+//
+// Both numbers are defences against the sender rather than against the
+// format: a length-delimited field is an allocation instruction from
+// whoever sent it, and protobuf's nesting is unbounded by
+// specification.  Every implementation bounds both; this one says where
+// the numbers are instead of hiding them.
+pub struct PbLimits
+    // How deep groups and submessages may nest.  100 by default, which
+    // is what the C++ implementation has used since 2008.
+    max_depth: Int
+    // The most bytes one message may occupy.  A field that announces
+    // more is `PbMessageTooLarge` before anything is reserved for it.
+    max_message: Int
+    // Whether a `string` field's bytes are checked for UTF-8 as they
+    // are read.  On by default: proto3 requires it, and a `Str` whose
+    // bytes are not UTF-8 has a length nobody agrees on.  A reader
+    // walking a message it has no schema for does not know which
+    // length-delimited fields are strings, so this applies where
+    // `pbdyn` has a descriptor and nowhere else.
+    check_utf8: Bool
+
+// The limits a server should start from: depth 100, a 64 MiB message,
+// UTF-8 checked.
+//
+// ```novo
+// use pbread
+//
+// fn main() [io]
+//     println("${pbread.default_limits().max_depth}")   // 100
+// ```
+pub fn default_limits() -> PbLimits []
+    todo("pbread.default_limits")
+
+// The limits for a program reading messages from somewhere it does not
+// trust: depth 32, a 1 MiB message, UTF-8 checked.
+//
+// Named rather than left to a caller to assemble, because the numbers
+// that matter are the ones somebody chose on purpose.
+pub fn strict_limits() -> PbLimits []
+    todo("pbread.strict_limits")
+
+// One field's payload, in the shape its key announced and no other.
+//
+// This is deliberately NOT a typed value.  A varint is `int32`,
+// `int64`, `uint32`, `uint64`, `sint32`, `sint64`, `bool` or an enum
+// depending on a `.proto` file this module has not read, and answering
+// one of the eight would be a guess.  `pbdyn.value_of` is where a
+// descriptor turns one of these into a typed value.
+pub enum PbRaw
+    // Wire type 0.  The varint's sixty-four-bit pattern, unfolded by
+    // nothing.
+    PbRawVarint(bits: Int)
+    // Wire type 1.  Eight little-endian bytes as a sixty-four-bit
+    // pattern.
+    PbRawFixed64(bits: Int)
+    // Wire type 2.  The payload, key and length prefix excluded.
+    PbRawBytes(data: Bytes)
+    // Wire type 5.  Four little-endian bytes as a thirty-two-bit
+    // pattern.
+    PbRawFixed32(bits: Int)
+
+// What the reader drained.
+//
+// `PbGroupStart` and `PbGroupEnd` bracket a proto2 group's fields, so a
+// caller sees the nesting rather than a flat run with a field number it
+// has to match up itself.  A submessage produces ONE `PbFieldSeen` with
+// a `PbRawBytes` payload — nesting it would mean knowing it is a
+// submessage, and only a schema knows that.
+pub enum PbEvent
+    // A field arrived whole.  `raw_len` is what the field occupied
+    // including its key, which is what `pbunknown.keep` needs and what
+    // a caller computing an offset into the original buffer adds.
+    PbFieldSeen(tag: PbTag, value: PbRaw, at: Int, raw_len: Int)
+    // A group opened: wire type 3, with this field number.
+    PbGroupStart(field: Int, at: Int)
+    // A group closed: wire type 4, with the same number.
+    PbGroupEnd(field: Int, at: Int)
+
+// One turn of the reader: the reader after the step, what it produced,
+// and what it is waiting for.
+//
+// `need` is a HINT and never a promise — a varint has no announced
+// length, so the answer is 1 whenever the reader is inside one.  It is
+// 0 when the reader is between fields and would be content to stop.
+pub struct PbStep
+    reader: PbReader
+    events: [PbEvent]
+    need: Int
+
+// A message being read: the bytes not yet consumed, the group stack,
+// and how far in it is.
+//
+// Opaque on purpose.  Everything a caller needs is an accessor below,
+// and a field a caller reaches into is a field this package can never
+// change.
+pub struct PbReader
+    limits: PbLimits
+    pending: Bytes
+    offset: Int
+    depth: Int
+    groups: [Int]
+
+// A fresh reader over one message.
+pub fn reader(limits: PbLimits) -> PbReader []
+    todo("pbread.reader")
+
+// Feed a chunk and take every field that finished.
+//
+// A field split across two chunks stays pending until the rest arrives;
+// nothing is copied twice and nothing is parsed twice.  A chunk that
+// finishes nothing is an empty event list and not an error — on a
+// socket that is the ordinary case.
+//
+// ```novo
+// use std.bytes
+// use pbread
+//
+// fn main() [io]
+//     // field 1, length-delimited, "abc".
+//     let buf = bytes.from_hex("0a03616263") ?? bytes.zeros(0)
+//     match pbread.feed(pbread.reader(pbread.default_limits()), bytes.to_byte_list(buf))
+//         Ok(s)  => println("${s.events.len()}")   // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn feed(r: PbReader, chunk: [u8]) -> Result<PbStep, PbDecodeError> []
+    todo("pbread.feed")
+
+// Say that the message ends here.
+//
+// The host is the only party that knows where a message stops, so this
+// is how it says so.  Bytes still pending are `PbTruncated`; a group
+// still open is `PbUnclosedGroup`.  A message that ends cleanly answers
+// a step with `need` 0 and whatever the last chunk finished.
+pub fn finish(r: PbReader) -> Result<PbStep, PbDecodeError> []
+    todo("pbread.finish")
+
+// How many bytes the reader has consumed since it was made.
+//
+// The number every `PbDecodeError`'s `at` is counted in, so a log line
+// from this end and one from the other end name the same byte.
+pub fn offset(r: PbReader) -> Int []
+    todo("pbread.offset")
+
+// How many fed bytes are still waiting for the rest of their field.
+pub fn pending_len(r: PbReader) -> Int []
+    todo("pbread.pending_len")
+
+// How many groups are open.
+pub fn depth(r: PbReader) -> Int []
+    todo("pbread.depth")
+
+// Whether the reader is between fields, and so would accept `finish`
+// without refusing.
+pub fn at_boundary(r: PbReader) -> Bool []
+    todo("pbread.at_boundary")
+
+// ── the whole-buffer forms ───────────────────────────────────────────
+
+// Every field of a message the caller already holds entirely.
+//
+// The convenience over `feed` and `finish` for the common case: a
+// message that arrived inside a gRPC frame, a length-delimited field,
+// or a file.
+//
+// ```novo
+// use std.bytes
+// use pbread
+//
+// fn main() [io]
+//     let buf = bytes.from_hex("089601") ?? bytes.zeros(0)
+//     match pbread.walk(buf, pbread.default_limits())
+//         Ok(evs) => println("${evs.len()}")   // 1 — field 1, varint 150
+//         Err(e)  => println(e.message())
+// ```
+pub fn walk(src: Bytes, limits: PbLimits) -> Result<[PbEvent], PbDecodeError> []
+    todo("pbread.walk")
+
+// Every field of the `len` bytes at `off`.
+//
+// What a caller re-entering a submessage calls: a `PbRawBytes` payload
+// is a nested message's bytes, and this reads them without copying them
+// out first.
+pub fn walk_range(src: Bytes, off: Int, len: Int,
+                  limits: PbLimits) -> Result<[PbEvent], PbDecodeError> []
+    todo("pbread.walk_range")
+
+// Every element of a packed repeated field, decoded as `t`.
+//
+// A packed field arrives as one `PbRawBytes`, and only the schema knows
+// that its bytes are a hundred `sint32`s rather than a string.  This is
+// the function `pbdyn` calls once it does.
+pub fn unpack(data: Bytes, t: PbFieldType) -> Result<[PbRaw], PbDecodeError> []
+    todo("pbread.unpack")
+
+// ── keeping what is not known ────────────────────────────────────────
+
+// Split a message's fields into the ones `wanted` names and the ones it
+// does not.
+//
+// The second half is what a program must write back out unchanged, and
+// this is the one call that makes doing so the default rather than an
+// act of diligence.  `wanted` is the field numbers this program's
+// schema declares.
+//
+// ```novo
+// use std.bytes
+// use pbread
+// use pbunknown
+//
+// fn main() [io]
+//     let buf = bytes.from_hex("089601") ?? bytes.zeros(0)
+//     match pbread.partition(buf, [2], pbread.default_limits())
+//         Ok(p)  => println("${pbunknown.count(p.unknown)}")   // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn partition(src: Bytes, wanted: [Int],
+                 limits: PbLimits) -> Result<PbPartition, PbDecodeError> []
+    todo("pbread.partition")
+
+// A message split into the fields a schema declared and the fields it
+// did not.
+pub struct PbPartition
+    known: [PbEvent]
+    unknown: PbUnknownSet
+
+// ── the bound effect parameter ───────────────────────────────────────
+
+// Read one whole message from the caller's source.
+//
+// The pump written once inside the package, charged whatever the
+// caller's source costs: `[io]` for a socket, nothing for a buffer
+// (`docs/publishing.md` § How a `core` package takes bytes from its
+// host).  `limit` is how many bytes the message is — the host knows,
+// because a protobuf message is not self-delimiting.
+//
+// It does not replace `feed` and `finish`: a caller that cannot give up
+// control of its own loop still needs the state machine.
+pub fn drain<S: Read[e]>(r: PbReader, src: S, limit: Int) -> Result<PbStep, PbDecodeError> [e]
+    todo("pbread.drain")

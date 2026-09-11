@@ -1,0 +1,322 @@
+// pbwrite — one message, written into memory the caller already owns.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// THE LENGTH PREFIX IS THE WHOLE PROBLEM.  A submessage is written as a
+// varint length and then that many bytes, and the length is itself a
+// varint whose WIDTH depends on the number it holds.  So a writer
+// cannot write a submessage's key, leave a hole and come back: the hole
+// is one byte wide if the body turns out to be under 128 bytes and five
+// if it is over 2^28, and a writer that reserved five and used one has
+// written a message with four junk bytes in the middle of it.
+//
+// There are three honest ways out and this module takes the first two:
+//
+//   SIZE FIRST.  Walk the value, add up `*_len`, then write once.  Two
+//   passes over the value and one over the buffer, no copying, and the
+//   buffer can be exactly the right size.  This is what generated code
+//   does, and what `*_len` and `*_into` are for.
+//
+//   BUILD INSIDE OUT.  Encode the body into a buffer of its own, then
+//   write its length and copy it.  One pass over the value, one
+//   allocation per nesting level.  This is `PbBuilder`, for a caller
+//   who would rather not write the sizing pass.
+//
+//   WRITE BACKWARD, from the last field to the first, which is what the
+//   C++ implementation does.  It is not here: it needs the whole
+//   message in one buffer sized in advance, which is the same
+//   arithmetic as sizing first without the readability.
+//
+// A `*_into` FUNCTION NEVER ALLOCATES AND NEVER GROWS.  It takes a
+// `Cursor` over the caller's bytes and answers how many it wrote, or
+// `PbBufferTooSmall` with what it needed.  `base64-nv` and `cbor-nv`
+// have the same shape, for the same reason: a `core` package that
+// allocated would have decided for an embedded caller that it has a
+// heap.
+//
+// FIELD ORDER IS THE CALLER'S.  Protobuf does not require ascending
+// field numbers and this module does not impose them, because a
+// writer that reordered fields would break a caller re-emitting a
+// message it must not change — the signed-payload case `pbunknown`
+// exists for.  Ascending order is what generated code will emit
+// because it is what every other generator emits.
+
+use std.bytes
+use pbunknown
+
+// ── how long it will be ──────────────────────────────────────────────
+
+// How many bytes a varint field — `uint32`, `uint64`, `bool`, an enum —
+// occupies: its key, then the value.
+//
+// ```novo
+// use pbwire
+// use pbwrite
+//
+// fn main() [io]
+//     println("${pbwrite.varint_field_len(1, 150)}")   // 3
+// ```
+pub fn varint_field_len(field: Int, v: Int) -> Int []
+    todo("pbwrite.varint_field_len")
+
+// How many bytes an `int32` field occupies: eleven for every negative
+// value, because the sign extension makes the varint ten bytes long.
+pub fn int32_field_len(field: Int, v: Int) -> Int []
+    todo("pbwrite.int32_field_len")
+
+// How many bytes an `sint32` field occupies.
+pub fn sint32_field_len(field: Int, v: Int) -> Int []
+    todo("pbwrite.sint32_field_len")
+
+// How many bytes an `sint64` field occupies.
+pub fn sint64_field_len(field: Int, v: Int) -> Int []
+    todo("pbwrite.sint64_field_len")
+
+// How many bytes a fixed-width field occupies: its key, then 4 or 8.
+pub fn fixed_field_len(field: Int, t: PbFieldType) -> Int []
+    todo("pbwrite.fixed_field_len")
+
+// How many bytes a length-delimited field of `payload` bytes occupies:
+// its key, the varint length, and the payload.
+//
+// The one function a sizing pass calls for every string, every byte
+// string, every submessage and every packed field.  `payload` is the
+// body's own length — for a submessage, the sum of ITS fields' lengths,
+// which is why the pass is a recursion and not a loop.
+//
+// ```novo
+// use pbwrite
+//
+// fn main() [io]
+//     println("${pbwrite.delimited_field_len(1, 3)}")   // 5
+// ```
+pub fn delimited_field_len(field: Int, payload: Int) -> Int []
+    todo("pbwrite.delimited_field_len")
+
+// How many bytes the packed payload of `values` occupies, length prefix
+// and key excluded.
+//
+// Packed is worth it exactly when this is smaller than the elements
+// written one key each, and for a repeated `int32` of small numbers it
+// always is.
+pub fn packed_payload_len(t: PbFieldType, values: [Int]) -> Int []
+    todo("pbwrite.packed_payload_len")
+
+// ── writing one field ────────────────────────────────────────────────
+
+// Write a varint field: `uint32`, `uint64`, `bool` as 0 or 1, or an
+// enum's number.
+pub fn write_varint_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_varint_field")
+
+// Write an `int32` or `int64` field: two's complement, sign-extended to
+// sixty-four bits.
+pub fn write_int_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_int_field")
+
+// Write an `sint32` field: the zigzag fold, then a varint.
+pub fn write_sint32_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_sint32_field")
+
+// Write an `sint64` field.
+pub fn write_sint64_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_sint64_field")
+
+// Write a `bool` field as the varint 0 or 1.
+//
+// A reader treats every non-zero varint as true, which the
+// specification requires; a writer emits 1 and nothing else, which
+// keeps two encodings of the same message identical.
+pub fn write_bool_field(field: Int, v: Bool, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_bool_field")
+
+// Write a `fixed32` or `sfixed32` field: four little-endian bytes.
+pub fn write_fixed32_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_fixed32_field")
+
+// Write a `fixed64` or `sfixed64` field: eight little-endian bytes.
+pub fn write_fixed64_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_fixed64_field")
+
+// Write a `float` field: IEEE 754 binary32, narrowed from the
+// sixty-four-bit `Float` the caller holds.
+pub fn write_float_field(field: Int, v: Float, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_float_field")
+
+// Write a `double` field: IEEE 754 binary64.
+pub fn write_double_field(field: Int, v: Float, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_double_field")
+
+// Write a `string` field.
+//
+// `PbEncodeNotUtf8` when the text is not UTF-8, naming the byte.  The
+// check is here and not at the reader's option because proto3 requires
+// it of a writer unconditionally, and a message that fails it at the
+// far end is a message this program should not have sent.
+pub fn write_string_field(field: Int, s: Str, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_string_field")
+
+// Write a `bytes` field: any octets at all, length-prefixed.
+pub fn write_bytes_field(field: Int, b: Bytes, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_bytes_field")
+
+// Write a submessage field whose body is already encoded.
+//
+// The body is bytes because a sizing pass produced them, or because a
+// caller is forwarding a message it did not decode.  The second is the
+// case that matters: a proxy that must not re-encode what it is
+// passing on writes the bytes it received.
+pub fn write_message_field(field: Int, body: Bytes,
+                           mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_message_field")
+
+// Write a packed repeated field: one key, one length, then the
+// elements' payloads end to end.
+//
+// `PbValueOutOfRange` for a type that may not be packed — `string`,
+// `bytes`, `message`, `group` — because the refusal is about the type
+// rather than about any one value and a caller should meet it at the
+// call that made the mistake.
+pub fn write_packed_field(field: Int, t: PbFieldType, values: [Int],
+                          mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_packed_field")
+
+// Write a repeated field the unpacked way: one key per element.
+//
+// What proto2 does by default, what proto3 does when a field says
+// `[packed = false]`, and the only form available for `string`,
+// `bytes` and submessages.
+pub fn write_repeated_varint_field(field: Int, values: [Int],
+                                   mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_repeated_varint_field")
+
+// Write a group: the open key, the body's bytes, the close key.
+//
+// proto2 only, and here because the messages that use groups are still
+// in production and a program that has to answer one has to be able to
+// write one.
+pub fn write_group_field(field: Int, body: Bytes, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_group_field")
+
+// Write the fields a reader kept but did not understand, in arrival
+// order.
+//
+// Called last, after every known field, which is where every other
+// implementation puts them.  It is `pbunknown.write_into` with the
+// message's own cursor.
+pub fn write_unknown(u: PbUnknownSet, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbwrite.write_unknown")
+
+// ── the builder, for a caller who will not size first ────────────────
+
+// A message being built inside out: a buffer per open nesting level.
+//
+// The trade against sizing first is one allocation per level and one
+// copy per level, in exchange for one pass over the value instead of
+// two.  A generated encoder sizes first; a program assembling a request
+// by hand reaches for this.
+pub struct PbBuilder
+    stack: [Bytes]
+    fields: [Int]
+    depth: Int
+    limits: PbBuildLimits
+
+// What a builder will not do.
+pub struct PbBuildLimits
+    // How deep messages may nest.  The reader's bound, for the same
+    // reason: a value assembled from something that arrived can nest as
+    // deeply as whatever produced it.
+    max_depth: Int
+    // The most bytes one message may occupy.
+    max_message: Int
+
+// The builder's default bounds: depth 100, a 64 MiB message.
+pub fn build_limits() -> PbBuildLimits []
+    todo("pbwrite.build_limits")
+
+// A fresh builder, at the top level.
+//
+// ```novo
+// use pbwrite
+//
+// fn main() [io]
+//     println("${pbwrite.builder_depth(pbwrite.builder(pbwrite.build_limits()))}")   // 0
+// ```
+pub fn builder(limits: PbBuildLimits) -> PbBuilder []
+    todo("pbwrite.builder")
+
+// How many messages are open.
+pub fn builder_depth(b: PbBuilder) -> Int []
+    todo("pbwrite.builder_depth")
+
+// How many bytes the message at the top of the stack holds so far.
+pub fn builder_len(b: PbBuilder) -> Int []
+    todo("pbwrite.builder_len")
+
+// Open a submessage under `field`.
+//
+// Its bytes accumulate in a buffer of their own until `end`, which is
+// what makes the length knowable without a sizing pass.
+pub fn begin(b: PbBuilder, field: Int) -> Result<PbBuilder, PbEncodeError> []
+    todo("pbwrite.begin")
+
+// Close the open submessage: write its key and length into the level
+// below, then its bytes.
+//
+// `PbEncodeDepthExceeded` is the open direction's refusal; closing more
+// than was opened is the caller's own mistake and is a panic rather
+// than a value, because no input can produce it.
+pub fn end(b: PbBuilder) -> Result<PbBuilder, PbEncodeError> []
+    todo("pbwrite.end")
+
+// Add one varint field to the open message.
+pub fn put_varint(b: PbBuilder, field: Int, v: Int) -> Result<PbBuilder, PbEncodeError> []
+    todo("pbwrite.put_varint")
+
+// Add one `sint64` field to the open message.
+pub fn put_sint(b: PbBuilder, field: Int, v: Int) -> Result<PbBuilder, PbEncodeError> []
+    todo("pbwrite.put_sint")
+
+// Add one `string` field to the open message.
+pub fn put_string(b: PbBuilder, field: Int, s: Str) -> Result<PbBuilder, PbEncodeError> []
+    todo("pbwrite.put_string")
+
+// Add one `bytes` field to the open message.
+pub fn put_bytes(b: PbBuilder, field: Int, v: Bytes) -> Result<PbBuilder, PbEncodeError> []
+    todo("pbwrite.put_bytes")
+
+// Add one fixed-width field to the open message.
+pub fn put_fixed(b: PbBuilder, field: Int, t: PbFieldType,
+                 v: Int) -> Result<PbBuilder, PbEncodeError> []
+    todo("pbwrite.put_fixed")
+
+// Add one packed repeated field to the open message.
+pub fn put_packed(b: PbBuilder, field: Int, t: PbFieldType,
+                  values: [Int]) -> Result<PbBuilder, PbEncodeError> []
+    todo("pbwrite.put_packed")
+
+// Add the fields a reader kept, at the end of the open message.
+pub fn put_unknown(b: PbBuilder, u: PbUnknownSet) -> Result<PbBuilder, PbEncodeError> []
+    todo("pbwrite.put_unknown")
+
+// Close the builder and answer the top-level message's bytes.
+//
+// `PbEncodeDepthExceeded` when a submessage is still open — the one
+// mistake a builder can make that a type cannot catch.
+//
+// ```novo
+// use std.bytes
+// use pbwrite
+//
+// fn main() [io]
+//     let b = pbwrite.builder(pbwrite.build_limits())
+//     match pbwrite.put_varint(b, 1, 150)
+//         Ok(b2) =>
+//             match pbwrite.done(b2)
+//                 Ok(out) => println(bytes.to_hex(out))   // 089601
+//                 Err(e)  => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn done(b: PbBuilder) -> Result<Bytes, PbEncodeError> []
+    todo("pbwrite.done")

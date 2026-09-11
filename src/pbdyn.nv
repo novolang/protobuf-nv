@@ -1,0 +1,238 @@
+// pbdyn — a message addressed by field number, over a descriptor read
+// at run time.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHO NEEDS THIS.  Three programs, and all three are ones nobody can
+// generate code for:
+//
+//   A gRPC client driven by reflection — `grpcurl`'s job.  The service
+//   describes itself, the client builds a request from a descriptor it
+//   was handed thirty milliseconds ago, and there was never a `.proto`
+//   file on this machine.
+//
+//   A proxy that routes on a field.  It has to read field 3 of a
+//   message whose other fields it must not touch and must not lose.
+//
+//   A tool that prints a message.  A log viewer, a queue browser, a
+//   test fixture differ.
+//
+// WHAT IT IS NOT.  It is not the fast path and it does not pretend to
+// be: every field costs a descriptor lookup and every value costs an
+// allocation.  Generated structs are what a service should use, and
+// `pbgen` is where they come from.
+//
+// THE RAW HALF IS STILL THERE.  A `PbDynamic` keeps its unknown fields
+// like every other reader here, so a proxy that decodes, changes one
+// field and re-encodes sends everything it received.  That is the
+// property the whole design exists for; anything else would be a
+// pretty printer.
+//
+// SIXTY-FOUR UNSIGNED BITS DO NOT FIT A novo-lang `Int`.  `uint64` and
+// `fixed64` at or above 2^63 come back as the same sixty-four bits read
+// as a negative `Int`.  Nothing is lost — it is the same bit pattern,
+// and re-encoding it writes the same bytes — but printing one without
+// `uint64_text` prints the wrong number, so the function is here and
+// the README says it in the limits section.
+
+use pbdesc
+
+// One value of one field, typed by the descriptor rather than by the
+// wire.
+//
+// The variants that carry a number carry it as a novo-lang `Int`, which
+// is signed and sixty-four bits: see the note above for what that means
+// for `uint64`.
+pub enum PbValue
+    // Any of the eight varint types, and the two signed fixed widths.
+    PbNum(v: Int)
+    // `double` and `float`.
+    PbReal(v: Float)
+    // `bool`.
+    PbFlag(v: Bool)
+    // `string`.  UTF-8 by the time it is here: `decode` refuses bytes
+    // that are not.
+    PbText(v: Str)
+    // `bytes`.
+    PbOctets(v: Bytes)
+    // An enum's number, and the name the descriptor gives it — or `""`
+    // when the descriptor has no name for it, which proto3's open enums
+    // make an ordinary case rather than an error.
+    PbEnumOf(number: Int, name: Str)
+    // A submessage, or a group.
+    PbNested(m: PbDynamic)
+    // A repeated field's elements, in wire order.
+    PbList(items: [PbValue])
+    // A map field's entries, in wire order.  Protobuf's maps have no
+    // order on the wire and this one is the order the bytes arrived in,
+    // which is what makes a re-encode byte-stable.
+    PbMap(entries: [PbMapEntry])
+
+// One entry of a map field.
+pub struct PbMapEntry
+    key: PbValue
+    value: PbValue
+
+// One field that is set, and what it is set to.
+pub struct PbSetField
+    number: Int
+    value: PbValue
+
+// A message: which type it is, which of its fields are set, and what
+// arrived that its type does not declare.
+pub struct PbDynamic
+    // The fully-qualified name, leading dot included: `.acme.Order`.
+    type_name: Str
+    // In the order the fields were set, which for a decoded message is
+    // the order they arrived.
+    fields: [PbSetField]
+    // What this program did not recognise, kept whole.
+    unknown: PbUnknownSet
+
+// An empty message of this type.
+//
+// ```novo
+// use pbdyn
+//
+// fn main() [io]
+//     let m = pbdyn.message(".acme.Order")
+//     println("${pbdyn.set_numbers(m).len()}")   // 0
+// ```
+pub fn message(type_name: Str) -> PbDynamic []
+    todo("pbdyn.message")
+
+// ── reading and writing ──────────────────────────────────────────────
+
+// Decode bytes as the named message type.
+//
+// `PbNoSuchType` when the set does not declare it — which is a
+// `PbSchemaError` shape and is answered here as a decode refusal,
+// because a caller decoding bytes is in the decode path and should not
+// have to match two error types to find out what went wrong.
+pub fn decode(set: PbFileSet, full_name: Str, src: Bytes,
+              limits: PbLimits) -> Result<PbDynamic, PbDecodeError> []
+    todo("pbdyn.decode")
+
+// Encode a message, unknown fields included, in field order.
+//
+// The fields are written in the order they are set and the unknown
+// fields last, which is what makes a decode-and-re-encode of an
+// untouched message produce the bytes it started from.
+pub fn encode(set: PbFileSet, m: PbDynamic) -> Result<Bytes, PbEncodeError> []
+    todo("pbdyn.encode")
+
+// How many bytes `encode` will produce, without producing them.
+//
+// The sizing pass `pbwrite` § the length prefix describes, run over a
+// dynamic value rather than a generated one.
+pub fn encoded_len(set: PbFileSet, m: PbDynamic) -> Result<Int, PbEncodeError> []
+    todo("pbdyn.encoded_len")
+
+// Encode into the caller's buffer, and answer the byte count.
+pub fn encode_into(set: PbFileSet, m: PbDynamic, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+    todo("pbdyn.encode_into")
+
+// ── reflection ───────────────────────────────────────────────────────
+
+// The value of the field with this number, or `None` when it is not
+// set.
+//
+// A repeated field answers `PbList` even when one element arrived; a
+// map answers `PbMap`.  Neither ever answers a bare element, because a
+// caller that had to handle both shapes would have a bug the first time
+// a list had one item in it.
+pub fn get(m: PbDynamic, number: Int) -> ?PbValue []
+    todo("pbdyn.get")
+
+// The value of the field with this `.proto` name.
+pub fn get_by_name(set: PbFileSet, m: PbDynamic, name: Str) -> ?PbValue []
+    todo("pbdyn.get_by_name")
+
+// Set a field, replacing whatever was there.
+//
+// The value is NOT checked against the descriptor here — `type_check`
+// is where that happens, and `encode` runs it.  Separating them is what
+// lets a caller build a message in whatever order it likes and find out
+// once at the end.
+pub fn set(m: PbDynamic, number: Int, v: PbValue) -> PbDynamic []
+    todo("pbdyn.set")
+
+// Clear a field.
+//
+// Setting a oneof's member clears the others; this clears one by
+// number, and clearing the one that is set leaves the oneof empty.
+pub fn clear(m: PbDynamic, number: Int) -> PbDynamic []
+    todo("pbdyn.clear")
+
+// Whether the field is set.
+//
+// For a proto3 singular scalar with implicit presence a zero and an
+// absent field are the same bytes, so this answers false for a field
+// decoded as zero — which is the wire's own answer and not a loss.
+// `pbdesc.has_presence` is how a caller knows which kind of field it
+// is holding.
+pub fn has(m: PbDynamic, number: Int) -> Bool []
+    todo("pbdyn.has")
+
+// Every field number that is set, in the order they were set.
+pub fn set_numbers(m: PbDynamic) -> [Int] []
+    todo("pbdyn.set_numbers")
+
+// Which member of this oneof is set, by field number, or `None`.
+pub fn which_oneof(set: PbFileSet, m: PbDynamic, oneof_name: Str) -> ?Int []
+    todo("pbdyn.which_oneof")
+
+// Merge `b` into `a` by protobuf's own merge rule: singular fields of
+// `b` win, repeated fields concatenate, submessages merge recursively,
+// unknown sets concatenate.
+//
+// The rule is not a convenience — it is what concatenating two encoded
+// messages means on the wire, and a decoder that did anything else
+// would disagree with every other implementation about what
+// `encode(a) ++ encode(b)` decodes to.
+pub fn merge(a: PbDynamic, b: PbDynamic) -> PbDynamic []
+    todo("pbdyn.merge")
+
+// Every way this value disagrees with its descriptor: a number the type
+// does not declare, a value of the wrong kind, a map key of a type
+// protobuf forbids.
+//
+// Run by `encode`, and available separately for a tool that wants to
+// tell a person what is wrong before it tries.
+pub fn type_check(set: PbFileSet, m: PbDynamic) -> [PbSchemaError] []
+    todo("pbdyn.type_check")
+
+// Which of the nine shapes a value is, as a word: `"num"`, `"real"`,
+// `"flag"`, `"text"`, `"octets"`, `"enum"`, `"nested"`, `"list"`,
+// `"map"`.
+//
+// For a refusal's message, and for a test that wants to assert a shape
+// without matching nine arms.
+pub fn value_kind(v: PbValue) -> Str []
+    todo("pbdyn.value_kind")
+
+// ── the sixty-four-bit unsigned gap, named ───────────────────────────
+
+// Render sixty-four bits as the unsigned decimal number they are.
+//
+// `PbNum(0 - 1)` holding a `uint64` is 18446744073709551615, and
+// printing the `Int` would say `-1`.  This is the function that says
+// the other one.
+//
+// ```novo
+// use pbdyn
+//
+// fn main() [io]
+//     println(pbdyn.uint64_text(0 - 1))   // 18446744073709551615
+// ```
+pub fn uint64_text(bits: Int) -> Str []
+    todo("pbdyn.uint64_text")
+
+// The sixty-four bits an unsigned decimal number names, or `None` when
+// the text is not a number below 2^64.
+//
+// The inverse of `uint64_text`, so a tool that read a number out of
+// JSON can put it in a `PbNum` without losing the top bit.
+pub fn uint64_of_text(s: Str) -> ?Int []
+    todo("pbdyn.uint64_of_text")
