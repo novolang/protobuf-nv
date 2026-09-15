@@ -1,6 +1,6 @@
 [package]
 name        = "protobuf-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "Protocol Buffers on the wire: the four wire types as tag arithmetic over a caller's buffer, a feed-and-drain reader that keeps the fields it does not know, a writer that back-patches its own lengths, FileDescriptorProto as novo-lang values parsed out of a descriptor set, a dynamic message addressed by field number, and the code generator's contract as a signature.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
