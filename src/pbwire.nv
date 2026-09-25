@@ -301,7 +301,7 @@ pub fn read_tag_at(src: Bytes, off: Int) -> Result<PbTagAt, PbDecodeError> []
 //
 // `PbBadFieldNumber` for a number outside the range, and
 // `PbReservedFieldNumber` for one inside `19000 ..= 19999`.
-pub fn write_tag_into(t: PbTag, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_tag_into(t: PbTag, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwire.write_tag_into")
 
 // ── the scalar codings ───────────────────────────────────────────────
@@ -322,7 +322,7 @@ pub struct PbFloatAt
 // leb128-nv's encoding, unchanged.  A negative value is written as its
 // unsigned sixty-four-bit pattern, which is what `int64` requires and
 // what makes `-1` ten bytes long.
-pub fn write_varint_into(v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_varint_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwire.write_varint_into")
 
 // Write an `int32`: sign-extend to sixty-four bits, then varint.
@@ -331,7 +331,7 @@ pub fn write_varint_into(v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> 
 // `int64` are wire-compatible in both directions and why a negative
 // `int32` costs ten bytes.  A value outside `-2^31 ..= 2^31 - 1` is
 // `PbValueOutOfRange` rather than silently truncated.
-pub fn write_int32_into(v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_int32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwire.write_int32_into")
 
 // Write an `sint32`: zigzag-nv's thirty-two-bit fold, then varint.
@@ -346,20 +346,20 @@ pub fn write_int32_into(v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> [
 //         Ok(n)  => println("${n}")   // 1 — where int32 would spend ten
 //         Err(e) => println(e.message())
 // ```
-pub fn write_sint32_into(v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_sint32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwire.write_sint32_into")
 
 // Write an `sint64`: the sixty-four-bit fold, then varint — which is
 // varint-nv's `encode_into` exactly.
-pub fn write_sint64_into(v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_sint64_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwire.write_sint64_into")
 
 // Write four fixed bytes, little-endian: `fixed32`, `sfixed32`.
-pub fn write_fixed32_into(v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_fixed32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwire.write_fixed32_into")
 
 // Write eight fixed bytes, little-endian: `fixed64`, `sfixed64`.
-pub fn write_fixed64_into(v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_fixed64_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwire.write_fixed64_into")
 
 // Write a `float`: IEEE 754 binary32, little-endian, four bytes.
@@ -368,11 +368,11 @@ pub fn write_fixed64_into(v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError>
 // narrowing is the caller's decision — the field's declared type made
 // it — and it is named here so nobody has to discover it from a
 // changed value.
-pub fn write_float_into(v: Float, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_float_into(v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwire.write_float_into")
 
 // Write a `double`: IEEE 754 binary64, little-endian, eight bytes.
-pub fn write_double_into(v: Float, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_double_into(v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwire.write_double_into")
 
 // Read a plain varint at `off`.

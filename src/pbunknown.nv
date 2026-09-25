@@ -128,5 +128,5 @@ pub fn encoded_len(u: PbUnknownSet) -> Int []
 //         Ok(n)  => println("${n}")   // 0
 //         Err(e) => println(e.message())
 // ```
-pub fn write_into(u: PbUnknownSet, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_into(u: PbUnknownSet, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbunknown.write_into")

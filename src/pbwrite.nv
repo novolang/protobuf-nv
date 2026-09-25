@@ -107,20 +107,20 @@ pub fn packed_payload_len(t: PbFieldType, values: [Int]) -> Int []
 
 // Write a varint field: `uint32`, `uint64`, `bool` as 0 or 1, or an
 // enum's number.
-pub fn write_varint_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_varint_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_varint_field")
 
 // Write an `int32` or `int64` field: two's complement, sign-extended to
 // sixty-four bits.
-pub fn write_int_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_int_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_int_field")
 
 // Write an `sint32` field: the zigzag fold, then a varint.
-pub fn write_sint32_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_sint32_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_sint32_field")
 
 // Write an `sint64` field.
-pub fn write_sint64_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_sint64_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_sint64_field")
 
 // Write a `bool` field as the varint 0 or 1.
@@ -128,24 +128,24 @@ pub fn write_sint64_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, Pb
 // A reader treats every non-zero varint as true, which the
 // specification requires; a writer emits 1 and nothing else, which
 // keeps two encodings of the same message identical.
-pub fn write_bool_field(field: Int, v: Bool, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_bool_field(field: Int, v: Bool, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_bool_field")
 
 // Write a `fixed32` or `sfixed32` field: four little-endian bytes.
-pub fn write_fixed32_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_fixed32_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_fixed32_field")
 
 // Write a `fixed64` or `sfixed64` field: eight little-endian bytes.
-pub fn write_fixed64_field(field: Int, v: Int, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_fixed64_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_fixed64_field")
 
 // Write a `float` field: IEEE 754 binary32, narrowed from the
 // sixty-four-bit `Float` the caller holds.
-pub fn write_float_field(field: Int, v: Float, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_float_field(field: Int, v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_float_field")
 
 // Write a `double` field: IEEE 754 binary64.
-pub fn write_double_field(field: Int, v: Float, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_double_field(field: Int, v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_double_field")
 
 // Write a `string` field.
@@ -154,11 +154,11 @@ pub fn write_double_field(field: Int, v: Float, mut dst: Cursor) -> Result<Int, 
 // check is here and not at the reader's option because proto3 requires
 // it of a writer unconditionally, and a message that fails it at the
 // far end is a message this program should not have sent.
-pub fn write_string_field(field: Int, s: Str, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_string_field(field: Int, s: Str, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_string_field")
 
 // Write a `bytes` field: any octets at all, length-prefixed.
-pub fn write_bytes_field(field: Int, b: Bytes, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_bytes_field(field: Int, b: Bytes, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_bytes_field")
 
 // Write a submessage field whose body is already encoded.
@@ -168,7 +168,7 @@ pub fn write_bytes_field(field: Int, b: Bytes, mut dst: Cursor) -> Result<Int, P
 // case that matters: a proxy that must not re-encode what it is
 // passing on writes the bytes it received.
 pub fn write_message_field(field: Int, body: Bytes,
-                           mut dst: Cursor) -> Result<Int, PbEncodeError> []
+                           var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_message_field")
 
 // Write a packed repeated field: one key, one length, then the
@@ -179,7 +179,7 @@ pub fn write_message_field(field: Int, body: Bytes,
 // rather than about any one value and a caller should meet it at the
 // call that made the mistake.
 pub fn write_packed_field(field: Int, t: PbFieldType, values: [Int],
-                          mut dst: Cursor) -> Result<Int, PbEncodeError> []
+                          var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_packed_field")
 
 // Write a repeated field the unpacked way: one key per element.
@@ -188,7 +188,7 @@ pub fn write_packed_field(field: Int, t: PbFieldType, values: [Int],
 // `[packed = false]`, and the only form available for `string`,
 // `bytes` and submessages.
 pub fn write_repeated_varint_field(field: Int, values: [Int],
-                                   mut dst: Cursor) -> Result<Int, PbEncodeError> []
+                                   var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_repeated_varint_field")
 
 // Write a group: the open key, the body's bytes, the close key.
@@ -196,7 +196,7 @@ pub fn write_repeated_varint_field(field: Int, values: [Int],
 // proto2 only, and here because the messages that use groups are still
 // in production and a program that has to answer one has to be able to
 // write one.
-pub fn write_group_field(field: Int, body: Bytes, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_group_field(field: Int, body: Bytes, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_group_field")
 
 // Write the fields a reader kept but did not understand, in arrival
@@ -205,7 +205,7 @@ pub fn write_group_field(field: Int, body: Bytes, mut dst: Cursor) -> Result<Int
 // Called last, after every known field, which is where every other
 // implementation puts them.  It is `pbunknown.write_into` with the
 // message's own cursor.
-pub fn write_unknown(u: PbUnknownSet, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_unknown(u: PbUnknownSet, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbwrite.write_unknown")
 
 // ── the builder, for a caller who will not size first ────────────────

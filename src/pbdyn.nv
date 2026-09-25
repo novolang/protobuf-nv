@@ -130,7 +130,7 @@ pub fn encoded_len(set: PbFileSet, m: PbDynamic) -> Result<Int, PbEncodeError> [
     todo("pbdyn.encoded_len")
 
 // Encode into the caller's buffer, and answer the byte count.
-pub fn encode_into(set: PbFileSet, m: PbDynamic, mut dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn encode_into(set: PbFileSet, m: PbDynamic, var dst: Cursor) -> Result<Int, PbEncodeError> []
     todo("pbdyn.encode_into")
 
 // ── reflection ───────────────────────────────────────────────────────
