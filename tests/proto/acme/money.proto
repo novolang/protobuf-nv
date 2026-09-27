@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package acme;
+
+enum Currency {
+  CURRENCY_UNSPECIFIED = 0;
+  CURRENCY_EUR = 1;
+  CURRENCY_USD = 2;
+  CURRENCY_OLD = -3;
+}
+
+message Money {
+  int64 units = 1;
+  Currency currency = 2;
+  sfixed32 nanos = 3;
+}

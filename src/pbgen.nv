@@ -1,137 +1,291 @@
-// pbgen — the code generator, as a contract rather than as a program.
+// pbgen — the code generator: a pure function from a descriptor set to
+// novo-lang source text.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
+// It opens nothing, writes nothing and runs no compiler.  `generate`
+// answers files as text, and the host decides where they go.  A golden
+// test of the generator is therefore a string comparison.
 //
-// WHAT A GENERATOR IS, HERE.  A pure function from a descriptor to
-// novo-lang source text.  It opens nothing, writes nothing and runs no
-// compiler: `generate` answers a list of files-as-strings and the host
-// decides where they go.  That is what keeps this package `core`, and
-// it is also what makes the generator TESTABLE — a golden test is a
-// string comparison, not a build.
+// Generated code is an interface that many other files depend on, so
+// its names are rules with functions of their own: `novo_type_name`,
+// `novo_field_name` and the rest.  A test pins a rule through them, and
+// a second generator, such as one for gRPC service stubs, calls them to
+// agree with this one.
 //
-// WHY THE CONTRACT IS PUBLISHED BEFORE THE GENERATOR.  Generated code
-// is an API that a hundred other files depend on, and changing it later
-// is a migration rather than a patch.  The naming rules, the shape of a
-// oneof, the shape of a map, and what proto3 presence turns into are
-// decided here, in signatures a reviewer can argue with, before a line
-// of the generator exists.  The README's "the generated-code contract"
-// section is the same decisions in prose with a worked example beside
-// them.
+// What one message generates, for `.acme.Order` in `acme/order.proto`:
 //
-// THE NAMING FUNCTIONS ARE THE CONTRACT.  `novo_type_name`,
-// `novo_field_name` and the rest are `pub` because they are the part of
-// the contract a test can pin: a golden file proves one example, and
-// `novo_type_name(".acme.Order") == "AcmeOrder"` proves the rule.  They
-// are also what a SECOND generator — a gRPC stub generator, say — has
-// to agree with, and grpc-codec-nv's service stubs are exactly that
-// second generator.
+// - a struct `AcmeOrder` with one `var` field per field of the message
+//   in declaration order, a field per oneof, and a last field
+//   `unknown` holding the fields the decoder did not recognise;
+// - `new_acme_order()`, the message with every field at its default;
+// - `encoded_len_acme_order(m)`, the size of the encoding;
+// - `write_acme_order(m, dst)`, the encoding written into a cursor;
+// - `encode_acme_order(m)`, the encoding as a new buffer;
+// - `decode_acme_order(src, limits)`, the message read back.
+//
+// A field's type follows `novo_field_type`.  A oneof becomes an enum
+// named by `novo_oneof_type_name` with one variant per member, held as
+// an optional.  A map becomes a list of the entry struct
+// `novo_map_entry_type_name` names, with fields `key` and `value`.  An
+// enum field is an `Int` holding the value's number, because proto3
+// enums are open and a number the schema does not name must survive a
+// round trip; each enum also generates an enum type with
+// `<enum>_number` and `<enum>_of` to convert.  A `.proto` file's
+// services generate one more module each, holding every method's gRPC
+// path.
+//
+// The encoder writes fields in field-number order and the unknown
+// fields last, which is the order every other implementation writes.
+// A singular submessage that arrives more than once is merged, as the
+// specification requires, by decoding the concatenation of its
+// occurrences.  A oneof member that arrives more than once keeps the
+// last arrival.
+
+use std.bytes
+use pbwire
+use pbunknown
+use pbdesc
 
 // What the generator writes, for one output file.
-//
-// `source` is text and not bytes: a generator that produced bytes would
-// be inviting a caller to put something in them that is not source.
 pub struct PbGenerated
-    // The path relative to the output root: `acme/order.nv`.  Derived
-    // from the `.proto` file's own path, so two files that did not
-    // collide as `.proto` do not collide as novo-lang.
+    // The path relative to the output root: the module name and `.nv`,
+    // such as `acme_order.nv`.  A novo-lang module is found by its
+    // file name, so the path is flat.
     path: Str
     // The module name a `use` line writes: `acme_order`.
     module: Str
-    // The novo-lang source.  Complete, formatted the way `novo fmt`
-    // formats it, and compilable on its own given the modules it
-    // imports.
+    // The novo-lang source, formatted as `novo fmt` formats it.  It
+    // compiles given this package and the modules it names in `use`
+    // lines.
     source: Str
 
 // What the generator may be asked to vary.
-//
-// Deliberately short.  Every option is a way for two generated trees to
-// differ, and the ones that are not here — field ordering, comment
-// style, whether to emit builders — are not here because the answer
-// should be the same everywhere.
 pub struct PbGenOptions
     // Prefixed to every generated module name, for a project that
-    // generates into a subdirectory.  `""` for none.
+    // generates several descriptor sets into one tree.  `""` for none.
     module_prefix: Str
-    // Emit `impl Serialize` and `impl Deserialize` beside the wire
-    // codecs, so a generated struct can also travel as JSON or CBOR
-    // through the standard library's traits.  On by default; a
-    // generated struct with them costs nothing to a caller that never
-    // calls them.
-    serde_impls: Bool
-    // Carry the `.proto` file's comments into the generated source as
-    // doc comments.  On by default, because a generated file with no
-    // prose is a file nobody reads twice.
-    carry_comments: Bool
-    // Emit the file's descriptor bytes as a `const`, so a generated
-    // module can answer a reflection request about itself without the
-    // original `.proto` file.
+    // Emit a function answering the file's descriptor, as a
+    // `FileDescriptorSet` holding that one file, so a program can
+    // answer a reflection request without the `.proto` file.
     embed_descriptor: Bool
 
-// The options every generated tree should start from.
+// The options a generated tree starts from: no prefix, no embedded
+// descriptor.
 //
 // ```novo
 // use pbgen
 //
 // fn main() [io]
-//     println("${pbgen.default_options().serde_impls}")   // true
+//     println("${pbgen.default_options().embed_descriptor}")   // false
 // ```
 pub fn default_options() -> PbGenOptions []
-    todo("pbgen.default_options")
+    PbGenOptions { module_prefix: "", embed_descriptor: false }
 
-// Generate novo-lang source for one file.
+// Generate novo-lang source for one file alone, under the default
+// options.
 //
-// The signature the grid's row for this package names, and the one a
-// caller reaches for.  An EMPTY LIST IS A REFUSAL: the generator does
-// not guess at a file it cannot generate correctly, and `refusals` is
-// where the reason is.  A caller that wants both at once calls
-// `generate_set`.
-//
-// One file in, one or more files out — one for the messages and enums,
-// and one more per service when the file declares any, because a
-// program that wants the types should not have to compile the stubs.
+// An empty list is a refusal, and `refusals` names the reasons.  A file
+// whose fields name types from its imports is refused here, because
+// one file does not carry its imports' declarations; `generate_set` is
+// the form for a whole set.
 pub fn generate(file: PbFile) -> [PbGenerated] []
-    todo("pbgen.generate")
+    match generate_set(PbFileSet { files: [file] }, default_options())
+        Ok(out) => out
+        Err(_)  => []
 
-// Generate for a whole descriptor set, with names resolved across
-// files.
+// Generate for a whole descriptor set, one module per file and one more
+// per service, with names resolved across files.
 //
-// The form a build system uses: a `type_name` that points into an
-// imported file resolves here and cannot resolve in `generate`, which
-// sees one file and its imports' names but not their contents.
+// Answers the first reason the set cannot be generated: a `validate`
+// finding or a `refusals` finding of one of its files.
 pub fn generate_set(set: PbFileSet, opts: PbGenOptions) -> Result<[PbGenerated], PbSchemaError> []
-    todo("pbgen.generate_set")
+    for e in pbdesc.validate(set)
+        return Err(e)
+    for f in set.files
+        for e in refusals_in(set, f, opts)
+            return Err(e)
+    var out: [PbGenerated] = []
+    for f in set.files
+        list.push(out, file_module(set, f, opts))
+        for s in f.services
+            list.push(out, service_module(f, s, opts))
+    Ok(out)
 
-// Every reason the generator will not generate for this file.
+// Every reason the generator will not generate for this file, read as
+// a set of one file.
 //
-// An empty list means `generate` will produce something.  The list is
-// what a build tool prints, and the four entries it can hold today are
-// named in the README:
-//
-//   an EXTENSION, which needs a run-time registry the generated code
-//   would consult, and that is a design of its own;
-//   a GROUP, which is readable on the wire and has no novo-lang shape
-//   worth generating — a caller that meets one uses `pbdyn`;
-//   an EDITION file, whose feature resolution is a specification this
-//   package does not implement;
-//   a name that no renaming rule can make unique — two `.proto`
-//   messages whose novo-lang names would collide, which the global
-//   type namespace makes a refusal rather than a warning.
+// The list holds `validate`'s findings for that set, and these:
+// `PbNotGenerated` for an extension, which needs a registry the
+// generated code would consult at run time, and for a group, which has
+// no generated shape and is read with `pbdyn`; `PbUnknownSyntax` for an
+// edition; and `PbDuplicateName` for two generated identifiers that
+// would be the same, for a field named `unknown`, for a type name this
+// package or the language already uses, and for a module name the
+// standard library uses.
 pub fn refusals(file: PbFile) -> [PbSchemaError] []
-    todo("pbgen.refusals")
+    let set = PbFileSet { files: [file] }
+    var errs = pbdesc.validate(set)
+    list.append(errs, refusals_in(set, file, default_options()))
+    errs
 
-// ── the naming rules, as functions a test can pin ────────────────────
+fn refusals_in(set: PbFileSet, f: PbFile, opts: PbGenOptions) -> [PbSchemaError]
+    var errs: [PbSchemaError] = []
+    for x in f.extensions
+        list.push(errs, PbNotGenerated(path: x.name, what: "an extension"))
+    var types: [Str] = []
+    var variants: [Str] = []
+    let module = opts.module_prefix + novo_module_name(f.name)
+    if list.contains(stdlib_modules(), module)
+        list.push(errs, PbDuplicateName(path: f.name, name: module))
+    for m in pbdesc.all_messages(f)
+        let mp = dotless(m.full_name)
+        for x in m.extensions
+            list.push(errs, PbNotGenerated(path: "${mp}.${x.name}", what: "an extension"))
+        claim(errs, types, mp, novo_type_name(m.full_name))
+        var fields: [Str] = [unknown_field_name()]
+        for fd in m.fields
+            if fd.field_type == PbTypeGroup
+                list.push(errs, PbNotGenerated(path: "${mp}.${fd.name}", what: "a group"))
+            if fd.oneof_index < 0 or m.oneofs[fd.oneof_index].synthetic
+                claim(errs, fields, mp, novo_field_name(fd.name))
+            else
+                let o = m.oneofs[fd.oneof_index].name
+                claim(errs, variants, mp, novo_oneof_variant_name(m.full_name, o, fd.name))
+        for o in m.oneofs
+            if not o.synthetic
+                claim(errs, fields, mp, novo_field_name(o.name))
+                claim(errs, types, mp, novo_oneof_type_name(m.full_name, o.name))
+    for e in all_enums(f)
+        let ep = dotless(e.full_name)
+        claim(errs, types, ep, novo_type_name(e.full_name))
+        for v in e.values
+            claim(errs, variants, ep, novo_variant_name(e.full_name, v.name))
+    errs
+
+// Record a generated name, refusing one already taken or one the
+// language or this package uses.
+fn claim(var errs: [PbSchemaError], var taken: [Str], at: Str, name: Str)
+    if list.contains(taken, name) or list.contains(reserved_type_names(), name)
+        list.push(errs, PbDuplicateName(path: at, name: name))
+        return
+    list.push(taken, name)
+
+fn all_enums(f: PbFile) -> [PbEnum]
+    var out: [PbEnum] = list.clone(f.enums)
+    for m in pbdesc.all_messages(f)
+        list.append(out, list.clone(m.enums))
+    out
+
+fn dotless(full: Str) -> Str
+    if str.starts_with(full, ".")
+        return str.slice(full, 1, str.len(full))
+    full
+
+// The names of the types and variants the language and this package
+// declare, which a generated name may not take.
+fn reserved_type_names() -> [Str]
+    ["Int", "Float", "Bool", "Str", "Bytes", "Unit", "Result", "Ok", "Err", "Some", "None",
+     "Cursor", "Error", "IoError", "Read", "Write", "PbDecodeError", "PbEncodeError",
+     "PbSchemaError", "PbWireType", "PbFieldType", "PbTag", "PbTagAt", "PbIntAt",
+     "PbFloatAt", "PbSpan", "PbLimits", "PbRaw", "PbEvent", "PbStep", "PbReader",
+     "PbPartition", "PbUnknown", "PbUnknownSet", "PbBuilder", "PbBuildLimits", "PbSyntax",
+     "PbLabel", "PbNumberRange", "PbField", "PbOneof", "PbEnumValue", "PbEnum", "PbMessage",
+     "PbStreaming", "PbMethod", "PbService", "PbFileOptions", "PbFile", "PbFileSet",
+     "PbValue", "PbMapEntry", "PbSetField", "PbDynamic", "PbGenerated", "PbGenOptions",
+     "PbPiece"]
+
+// The standard library's module names, which a generated module may
+// not take.
+fn stdlib_modules() -> [Str]
+    ["array", "atomic", "autograd", "bigint", "bits", "bytes", "canvas", "cell", "chan", "cli",
+     "cmp", "codec", "collections", "crypto", "csv", "cursor", "dom", "env", "float", "fmt",
+     "fs", "future", "gpu", "hash", "hf", "http_client", "http_server", "int", "io", "iter",
+     "json", "list", "llm", "log", "markdown", "math", "mcp", "net", "nn", "otlp", "path",
+     "process", "ptr", "rand", "readline", "regex", "ring", "safetensors", "sb", "shm", "sql",
+     "store", "stream", "str", "tensor", "test", "time", "tls", "todo", "toml", "traits",
+     "tty", "tui", "ui", "url", "vec", "window", "wordpiece", "ws", "xml", "yaml", "zip"]
+
+// ── the naming rules ─────────────────────────────────────────────────
+
+// A word in upper camel case: the first letter of each part between
+// underscores upper-cased, the rest as written.
+fn upper_camel(s: Str) -> Str
+    var out = ""
+    var up = true
+    for i in 0..str.len(s)
+        let c = str.byte_at_or(s, i, 0)
+        if c == '_'
+            up = true
+        else if up and c >= 'a' and c <= 'z'
+            out = out + str.from_byte(c - 32)
+            up = false
+        else
+            out = out + str.from_byte(c)
+            up = false
+    out
+
+// A screaming-case word in upper camel case: `CURRENCY_EUR` becomes
+// `CurrencyEur`.
+fn camel_of_screaming(s: Str) -> Str
+    var out = ""
+    var up = true
+    for i in 0..str.len(s)
+        let c = str.byte_at_or(s, i, 0)
+        if c == '_'
+            up = true
+        else if up
+            out = out + str.from_byte(upper(c))
+            up = false
+        else
+            out = out + str.from_byte(lower(c))
+    out
+
+fn upper(c: Int) -> Int
+    if c >= 'a' and c <= 'z'
+        return c - 32
+    c
+
+fn lower(c: Int) -> Int
+    if c >= 'A' and c <= 'Z'
+        return c + 32
+    c
+
+fn is_upper(c: Int) -> Bool
+    c >= 'A' and c <= 'Z'
+
+fn is_lower_or_digit(c: Int) -> Bool
+    c >= 'a' and c <= 'z' or c >= '0' and c <= '9'
+
+// A name in snake case: an underscore before each upper-case letter
+// that starts a word, and everything lower-cased.
+fn snake(s: Str) -> Str
+    var out = ""
+    let n = str.len(s)
+    for i in 0..n
+        let c = str.byte_at_or(s, i, 0)
+        let prev = str.byte_at_or(s, i - 1, 0)
+        let next = str.byte_at_or(s, i + 1, 0)
+        let starts = is_upper(c) and i > 0 and prev != '_'
+            and (is_lower_or_digit(prev) or is_upper(prev) and is_lower_or_digit(next) and next != 0)
+        if starts
+            out = out + "_"
+        out = out + str.from_byte(lower(c))
+    out
+
+// A fully-qualified name in snake case, part by part.
+fn snake_full(full_name: Str) -> Str
+    var parts: [Str] = []
+    for p in str.split(dotless(full_name), ".")
+        list.push(parts, snake(p))
+    str.join(parts, "_")
 
 // The novo-lang type name for a fully-qualified protobuf name.
 //
-// The package path is folded into the name in upper camel case:
-// `.acme.orders.Order` becomes `AcmeOrdersOrder`.  That is uglier than
-// `Order` and it is not a preference — novo-lang keys struct identity
-// by NAME across the whole assembly, dependencies included, so two
-// generated trees that both declared `Order` could not be used by one
-// program (`docs/publishing.md` § Public type names are globally
-// unique).  The `.proto` file's own package is the disambiguator the
-// author already chose, so it is the one to use.
+// Every part of the name, the `.proto` package's included, in upper
+// camel case: `.acme.orders.Order` becomes `AcmeOrdersOrder`.
+// novo-lang resolves a struct by its name across the whole program,
+// dependencies included, so two generated trees that both declared
+// `Order` could not be used together.  The `.proto` package is the
+// qualifier the author already chose.
 //
 // ```novo
 // use pbgen
@@ -140,15 +294,14 @@ pub fn refusals(file: PbFile) -> [PbSchemaError] []
 //     println(pbgen.novo_type_name(".acme.orders.Order"))   // AcmeOrdersOrder
 // ```
 pub fn novo_type_name(full_name: Str) -> Str []
-    todo("pbgen.novo_type_name")
+    var out = ""
+    for p in str.split(dotless(full_name), ".")
+        out = out + upper_camel(p)
+    out
 
-// The novo-lang field name for a `.proto` field name.
-//
-// The `.proto` name unchanged — protobuf's convention is already
-// snake case and novo-lang's is too — except for a name that is a
-// novo-lang reserved word, which takes a trailing underscore.
-// `then`, `loop` and `register` are the ones a real `.proto` file
-// meets.
+// The novo-lang field name for a `.proto` field name: the name
+// unchanged, with a trailing underscore when it is a novo-lang
+// reserved word.
 //
 // ```novo
 // use pbgen
@@ -159,46 +312,66 @@ pub fn novo_type_name(full_name: Str) -> Str []
 //     println("${a} ${b}")   // unit_price loop_
 // ```
 pub fn novo_field_name(name: Str) -> Str []
-    todo("pbgen.novo_field_name")
+    if is_reserved_word(name)
+        return name + "_"
+    name
 
-// The generated module name for a `.proto` file path.
-//
-// `acme/order.proto` becomes `acme_order`: the directories joined with
-// underscores, the extension dropped.  A module name is unique across
-// the assembly the same way a type name is, so the path is folded in
-// for the same reason.
+// The generated module name for a `.proto` file path: the extension
+// dropped and every `/`, `.` and `-` made an underscore.
+// `acme/order.proto` becomes `acme_order`.
 pub fn novo_module_name(file_name: Str) -> Str []
-    todo("pbgen.novo_module_name")
+    var base = file_name
+    if str.ends_with(base, ".proto")
+        base = str.slice(base, 0, str.len(base) - 6)
+    var out = ""
+    for i in 0..str.len(base)
+        let c = str.byte_at_or(base, i, 0)
+        if c == '/' or c == '.' or c == '-'
+            out = out + "_"
+        else
+            out = out + str.from_byte(lower(c))
+    out
 
-// The generated enum variant name for one value of one enum.
+// The generated variant name for one value of one enum.
 //
-// The enum's novo-lang name, then the value's name in upper camel case
-// with the enum's own prefix stripped when it has one:
+// The enum's type name, then the value's name in upper camel case with
+// the enum's own name stripped from its front when it is there:
 // `.acme.Currency`'s `CURRENCY_EUR` becomes `AcmeCurrencyEur`.  The
-// prefix strip is what protobuf's own style guide asks generators to
-// do, and the enum name is prepended because a VARIANT is resolved by
-// name across the assembly too — `Err(Transport(9))` binds whichever
-// `Transport` was declared first.
+// protobuf style guide prefixes values that way, and novo-lang resolves
+// a variant by its name across the whole program, so the enum's name
+// goes in front.
 pub fn novo_variant_name(enum_full_name: Str, value_name: Str) -> Str []
-    todo("pbgen.novo_variant_name")
+    let parts = str.split(dotless(enum_full_name), ".")
+    let simple = parts[list.len(parts) - 1]
+    let prefix = str.upper(snake(simple)) + "_"
+    var rest = value_name
+    if str.starts_with(value_name, prefix) and str.len(value_name) > str.len(prefix)
+        let tail = str.slice(value_name, str.len(prefix), str.len(value_name))
+        let first = str.byte_at_or(tail, 0, 0)
+        if not (first >= '0' and first <= '9')
+            rest = tail
+    novo_type_name(enum_full_name) + camel_of_screaming(rest)
 
-// The generated enum type name for a oneof.
-//
-// A oneof becomes an enum of its own, named for its message and
-// itself: `.acme.Order`'s `payment` oneof becomes `AcmeOrderPayment`.
-// The message's own struct holds it as `?AcmeOrderPayment`, because a
-// oneof with nothing set is the ordinary state.
+// The generated enum type name for a oneof: the message's type name
+// and the oneof's name in upper camel case.  `.acme.Order`'s `payment`
+// becomes `AcmeOrderPayment`.
 pub fn novo_oneof_type_name(message_full_name: Str, oneof_name: Str) -> Str []
-    todo("pbgen.novo_oneof_type_name")
+    novo_type_name(message_full_name) + upper_camel(oneof_name)
+
+// The generated variant name for one member of a oneof: the oneof's
+// type name and the member's name in upper camel case.  `.acme.Order`'s
+// `payment` member `card` becomes `AcmeOrderPaymentCard`.
+pub fn novo_oneof_variant_name(message_full_name: Str, oneof_name: Str,
+                               field_name: Str) -> Str []
+    novo_oneof_type_name(message_full_name, oneof_name) + upper_camel(field_name)
 
 // The novo-lang type a scalar protobuf type generates as.
 //
-// `Int` for every integral type, `Float` for `double` and `float`,
-// `Bool` for `bool`, `Str` for `string`, `Bytes` for `bytes`.  Eight
-// integral types onto one `Int` is the honest mapping — novo-lang has
-// one integer type and it is sixty-four bits signed — and what it costs
-// is named in the README's limits: `uint64` above 2^63 is the same bits
-// read as a negative, and a generated round trip preserves it.
+// `Int` for the integral types and for `enum`, `Float` for `double`
+// and `float`, `Bool`, `Str` and `Bytes`.  `message` and `group` are not
+// scalars and answer `""`.  novo-lang has one integer type, sixty-four
+// bits and signed, so a `uint64` at or above 2^63 is the negative `Int`
+// with the same bits, and a round trip keeps it.
 //
 // ```novo
 // use pbgen
@@ -208,67 +381,627 @@ pub fn novo_oneof_type_name(message_full_name: Str, oneof_name: Str) -> Str []
 //     println(pbgen.novo_scalar_type(PbTypeSfixed32))   // Int
 // ```
 pub fn novo_scalar_type(t: PbFieldType) -> Str []
-    todo("pbgen.novo_scalar_type")
+    match t
+        PbTypeDouble  => "Float"
+        PbTypeFloat   => "Float"
+        PbTypeBool    => "Bool"
+        PbTypeString  => "Str"
+        PbTypeBytes   => "Bytes"
+        PbTypeMessage => ""
+        PbTypeGroup   => ""
+        _             => "Int"
 
 // The whole novo-lang type a field generates as, presence and
 // repetition included.
 //
-// `[Int]` for a repeated `int32`; `?Str` for a `string` with presence;
-// `Str` for a proto3 singular `string` without it;
-// `[AcmeOrderTagsEntry]` for a `map<string, int32>` — a list of pairs,
-// which is the shape the README's contract section explains.
+// `[Int]` for a repeated `int32`, `?Str` for a `string` with presence,
+// `Str` for a proto3 singular `string` without it, `?AcmeMoney` for a
+// submessage, and `[AcmeOrderTagsEntry]` for a `map<string, int32>`.
 pub fn novo_field_type(set: PbFileSet, f: PbField, syntax: PbSyntax) -> Str []
-    todo("pbgen.novo_field_type")
+    let base = element_type(f)
+    if f.label == PbLabelRepeated
+        return "[${base}]"
+    if pbdesc.has_presence(f, syntax)
+        return "?${base}"
+    base
 
-// The novo-lang type name for a map field's pair struct.
-//
-// `.acme.Order`'s `tags` map becomes `AcmeOrderTagsEntry`, with fields
-// `key` and `value`.
+fn element_type(f: PbField) -> Str
+    if f.field_type == PbTypeMessage or f.field_type == PbTypeGroup
+        return novo_type_name(f.type_name)
+    novo_scalar_type(f.field_type)
+
+// The novo-lang type name for a map field's entry struct: the message's
+// type name, the field's name in upper camel case, and `Entry`.
+// `.acme.Order`'s `tags` becomes `AcmeOrderTagsEntry`, the name `protoc`
+// gives the entry message folded the same way.
 pub fn novo_map_entry_type_name(message_full_name: Str, field_name: Str) -> Str []
-    todo("pbgen.novo_map_entry_type_name")
+    novo_type_name(message_full_name) + upper_camel(field_name) + "Entry"
 
-// Whether a word is one novo-lang reserves, so a generated identifier
-// must not be it.
-//
-// `then`, `loop` and `register` among them.  Published because the
-// generator is not the only thing that needs the list — a hand-written
-// wrapper around generated code needs the same answer.
+// Whether a word is one novo-lang reserves (SPEC section 1.3), so a
+// generated identifier must not be it.
 pub fn is_reserved_word(s: Str) -> Bool []
-    todo("pbgen.is_reserved_word")
+    list.contains(reserved_words(), s)
 
-// ── what the generated code looks like, as facts ─────────────────────
+fn reserved_words() -> [Str]
+    ["fn", "let", "var", "if", "then", "else", "elif", "for", "while", "match", "return",
+     "struct", "enum", "trait", "impl", "type", "use", "async", "const", "await", "in", "and",
+     "or", "not", "true", "false", "null", "self", "prompt", "system", "asm",
+     "unsafe_discharge", "pass", "weak", "pub", "dyn", "as", "loop", "break", "continue", "mut",
+     "alias", "error_kind", "state_machine", "register", "peripheral", "memory_map",
+     "vector_table", "bsp", "static"]
 
-// The name of the generated function that encodes a message:
-// `encode_acme_order`.
-//
-// A free function rather than a method, because `impl` blocks on a
-// generated struct would put two of this package's decisions — the
-// trait and the method name — where a caller's own `impl` might want
-// to be.
+// ── the generated function names ─────────────────────────────────────
+
+// The generated function that encodes a message: `encode_acme_order`.
 pub fn encode_fn_name(message_full_name: Str) -> Str []
-    todo("pbgen.encode_fn_name")
+    "encode_" + snake_full(message_full_name)
 
-// The name of the generated function that decodes one:
-// `decode_acme_order`.
+// The generated function that decodes one: `decode_acme_order`.
 pub fn decode_fn_name(message_full_name: Str) -> Str []
-    todo("pbgen.decode_fn_name")
+    "decode_" + snake_full(message_full_name)
 
-// The name of the generated function that sizes one:
-// `encoded_len_acme_order`.
-//
-// Generated because the sizing pass is where the length prefix problem
-// is solved (`pbwrite` § the length prefix is the whole problem), and a
-// caller that wants to write into its own buffer needs the number
-// first.
+// The generated function that sizes one: `encoded_len_acme_order`.
 pub fn len_fn_name(message_full_name: Str) -> Str []
-    todo("pbgen.len_fn_name")
+    "encoded_len_" + snake_full(message_full_name)
 
-// The name of the generated field that holds a message's unknown
-// fields: `unknown`.
-//
-// Every generated struct has one, and the generated encoder writes it
-// last.  A struct without it would be a struct that silently drops a
-// newer peer's fields, which is the failure this whole package is
-// arranged to prevent.
+// The generated function that writes one into a cursor:
+// `write_acme_order`.
+pub fn write_fn_name(message_full_name: Str) -> Str []
+    "write_" + snake_full(message_full_name)
+
+// The generated function that answers a message with every field at
+// its default: `new_acme_order`.
+pub fn new_fn_name(message_full_name: Str) -> Str []
+    "new_" + snake_full(message_full_name)
+
+// The generated function that answers an enum value's number:
+// `acme_currency_number`.
+pub fn enum_number_fn_name(enum_full_name: Str) -> Str []
+    snake_full(enum_full_name) + "_number"
+
+// The generated function that answers the enum value a number names,
+// or `None`: `acme_currency_of`.
+pub fn enum_of_fn_name(enum_full_name: Str) -> Str []
+    snake_full(enum_full_name) + "_of"
+
+// The gRPC path of a method: `/acme.Orders/Get`.
+pub fn method_path(service_full_name: Str, method_name: Str) -> Str []
+    "/${dotless(service_full_name)}/${method_name}"
+
+// The generated function that answers a method's gRPC path:
+// `acme_orders_get_path`.
+pub fn method_path_fn_name(service_full_name: Str, method_name: Str) -> Str []
+    snake_full(service_full_name) + "_" + snake(method_name) + "_path"
+
+// The generated function that answers a file's descriptor:
+// `acme_order_descriptor`.
+pub fn descriptor_fn_name(file_name: Str) -> Str []
+    novo_module_name(file_name) + "_descriptor"
+
+// The name of the field every generated message struct keeps its
+// unknown fields in: `unknown`.  The generated encoder writes it last.
 pub fn unknown_field_name() -> Str []
-    todo("pbgen.unknown_field_name")
+    "unknown"
+
+// ── writing source ───────────────────────────────────────────────────
+
+// The lines of a file being generated.
+struct PbSrc
+    var lines: [Str]
+
+fn emit(var s: PbSrc, indent: Int, text: Str)
+    list.push(s.lines, str.repeat(" ", indent) + text)
+
+// A function signature, wrapped as `novo fmt` wraps one past a hundred
+// columns: parameters fill each line, and a continuation line starts
+// under the first parameter.
+fn signature(var s: PbSrc, head: Str, params: [Str], ret: Str)
+    let open = head + "("
+    let pad = str.repeat(" ", str.len(open))
+    var cur = open
+    for i in 0..list.len(params)
+        let last = i == list.len(params) - 1
+        let piece = if last then params[i] + ")" + ret else params[i] + ","
+        let first = i == 0
+        let joined = if first then cur + piece else cur + " " + piece
+        if first or str.len(joined) <= 100
+            cur = joined
+        else
+            list.push(s.lines, cur)
+            cur = pad + piece
+    list.push(s.lines, cur)
+
+// A struct literal, wrapped as `novo fmt` wraps one past a hundred
+// columns: the first field on the opening line, one field per line
+// after it.
+fn literal(var s: PbSrc, indent: Int, lead: Str, type_name: Str, fields: [Str])
+    let one = str.repeat(" ", indent) + lead + type_name + " { " + str.join(fields, ", ") + " }"
+    if str.len(one) <= 100 or list.len(fields) < 2
+        list.push(s.lines, one)
+        return
+    let n = list.len(fields)
+    emit(s, indent, lead + type_name + " { " + fields[0] + ",")
+    for i in 1..n
+        let tail = if i == n - 1 then " }" else ","
+        emit(s, indent + 4, fields[i] + tail)
+
+// Match arms with the arrows aligned, as `novo fmt` aligns them.
+fn arms(var s: PbSrc, indent: Int, pats: [Str], bodies: [Str])
+    var w = 0
+    for p in pats
+        if str.len(p) > w
+            w = str.len(p)
+    for i in 0..list.len(pats)
+        emit(s, indent, str.pad_right(pats[i], w, " ") + " => " + bodies[i])
+
+// What the generator knows while it writes one file.
+struct PbCtx
+    set: PbFileSet
+    file: PbFile
+    opts: PbGenOptions
+    module: Str
+
+// The module a message or enum is generated into.
+fn module_of(c: PbCtx, full_name: Str) -> Str
+    for f in c.set.files
+        for m in pbdesc.all_messages(f)
+            if m.full_name == full_name
+                return c.opts.module_prefix + novo_module_name(f.name)
+    c.module
+
+// A generated function's name as a call from this file: bare in its own
+// module, qualified in another.
+fn call(c: PbCtx, full_name: Str, fn_name: Str) -> Str
+    let m = module_of(c, full_name)
+    if m == c.module
+        return fn_name
+    "${m}.${fn_name}"
+
+// The modules this file's fields name, other than its own.
+fn other_modules(c: PbCtx) -> [Str]
+    var out: [Str] = []
+    for m in pbdesc.all_messages(c.file)
+        for f in m.fields
+            if f.field_type == PbTypeMessage
+                let mod = module_of(c, f.type_name)
+                if mod != c.module and not list.contains(out, mod)
+                    list.push(out, mod)
+    out
+
+fn file_module(set: PbFileSet, f: PbFile, opts: PbGenOptions) -> PbGenerated
+    let module = opts.module_prefix + novo_module_name(f.name)
+    let c = PbCtx { set: set, file: f, opts: opts, module: module }
+    var s = PbSrc { lines: [] }
+    emit(s, 0, "// ${module} — generated by protobuf-nv from ${f.name}.  Edit the .proto")
+    emit(s, 0, "// file and generate again rather than editing this one.")
+    emit(s, 0, "")
+    emit(s, 0, "use std.bytes")
+    for u in ["pbwire", "pbread", "pbwrite", "pbunknown", "pbcodec"]
+        emit(s, 0, "use ${u}")
+    for u in other_modules(c)
+        emit(s, 0, "use ${u}")
+    for e in all_enums(f)
+        gen_enum(s, e)
+    for m in pbdesc.all_messages(f)
+        gen_message(s, c, m)
+    if opts.embed_descriptor
+        gen_descriptor(s, f)
+    PbGenerated { path: module + ".nv", module: module, source: str.join(s.lines, "\n") + "\n" }
+
+fn gen_descriptor(var s: PbSrc, f: PbFile)
+    let hex = match pbdesc.write_file_set(PbFileSet { files: [f] })
+        Ok(b)  => bytes.to_hex(b)
+        Err(_) => ""
+    emit(s, 0, "")
+    emit(s, 0, "// ${f.name}'s descriptor, as a FileDescriptorSet holding that one file.")
+    emit(s, 0, "pub fn ${descriptor_fn_name(f.name)}() -> Bytes")
+    emit(s, 4, "bytes.from_hex(\"${hex}\") ?? bytes.zeros(0)")
+
+fn service_module(f: PbFile, sv: PbService, opts: PbGenOptions) -> PbGenerated
+    let module = opts.module_prefix + novo_module_name(f.name) + "_" + snake(sv.name)
+    var s = PbSrc { lines: [] }
+    emit(s, 0, "// ${module} — generated by protobuf-nv from ${f.name}.")
+    emit(s, 0, "// The gRPC paths of the service ${dotless(sv.full_name)}.")
+    for m in sv.methods
+        emit(s, 0, "")
+        emit(s, 0, "// The gRPC path of ${m.name}.")
+        emit(s, 0, "pub fn ${method_path_fn_name(sv.full_name, m.name)}() -> Str")
+        emit(s, 4, "\"${method_path(sv.full_name, m.name)}\"")
+    PbGenerated { path: module + ".nv", module: module, source: str.join(s.lines, "\n") + "\n" }
+
+// A number as novo-lang source: `0 - 3` for a negative one, since a
+// literal is never negative.
+fn num_text(n: Int) -> Str
+    if n < 0
+        return "0 - ${0 - n}"
+    "${n}"
+
+fn gen_enum(var s: PbSrc, e: PbEnum)
+    let t = novo_type_name(e.full_name)
+    var pats: [Str] = []
+    var bodies: [Str] = []
+    emit(s, 0, "")
+    emit(s, 0, "// The values of ${dotless(e.full_name)}.")
+    emit(s, 0, "pub enum ${t}")
+    for v in e.values
+        let name = novo_variant_name(e.full_name, v.name)
+        emit(s, 4, name)
+        list.push(pats, name)
+        list.push(bodies, num_text(v.number))
+    emit(s, 0, "")
+    emit(s, 0, "// The number of a value of ${dotless(e.full_name)}.")
+    emit(s, 0, "pub fn ${enum_number_fn_name(e.full_name)}(v: ${t}) -> Int")
+    emit(s, 4, "match v")
+    arms(s, 8, pats, bodies)
+    emit(s, 0, "")
+    emit(s, 0, "// The value of ${dotless(e.full_name)} a number names, or None.")
+    emit(s, 0, "pub fn ${enum_of_fn_name(e.full_name)}(n: Int) -> ?${t}")
+    var seen: [Int] = []
+    for v in e.values
+        if not list.contains(seen, v.number)
+            list.push(seen, v.number)
+            emit(s, 4, "if n == ${num_text(v.number)}")
+            emit(s, 8, "return Some(${novo_variant_name(e.full_name, v.name)})")
+    emit(s, 4, "None")
+
+// How one field is held and coded.
+enum PbShape
+    // A scalar without presence, written unless it is zero.
+    PbPlain
+    // A scalar or submessage with presence, held as an optional.
+    PbOptional
+    // A repeated field or a map, held as a list.
+    PbRepeated
+    // A member of a real oneof.
+    PbMember(oneof: Int)
+
+fn shape_of(set: PbFileSet, m: PbMessage, f: PbField, syntax: PbSyntax) -> PbShape
+    if f.label == PbLabelRepeated
+        return PbRepeated
+    if f.oneof_index >= 0 and not m.oneofs[f.oneof_index].synthetic
+        return PbMember(oneof: f.oneof_index)
+    if pbdesc.has_presence(f, syntax) and not m.map_entry
+        return PbOptional
+    if m.map_entry and f.field_type == PbTypeMessage
+        return PbOptional
+    PbPlain
+
+// Which of the codec's families a field's type belongs to.
+fn family(t: PbFieldType) -> Str
+    match t
+        PbTypeDouble  => "real"
+        PbTypeFloat   => "real"
+        PbTypeBool    => "flag"
+        PbTypeString  => "text"
+        PbTypeBytes   => "octets"
+        PbTypeMessage => "message"
+        PbTypeGroup   => "message"
+        _             => "int"
+
+fn type_const(t: PbFieldType) -> Str
+    match t
+        PbTypeDouble   => "PbTypeDouble"
+        PbTypeFloat    => "PbTypeFloat"
+        PbTypeInt64    => "PbTypeInt64"
+        PbTypeUint64   => "PbTypeUint64"
+        PbTypeInt32    => "PbTypeInt32"
+        PbTypeFixed64  => "PbTypeFixed64"
+        PbTypeFixed32  => "PbTypeFixed32"
+        PbTypeBool     => "PbTypeBool"
+        PbTypeString   => "PbTypeString"
+        PbTypeGroup    => "PbTypeGroup"
+        PbTypeMessage  => "PbTypeMessage"
+        PbTypeBytes    => "PbTypeBytes"
+        PbTypeUint32   => "PbTypeUint32"
+        PbTypeEnum     => "PbTypeEnum"
+        PbTypeSfixed32 => "PbTypeSfixed32"
+        PbTypeSfixed64 => "PbTypeSfixed64"
+        PbTypeSint32   => "PbTypeSint32"
+        PbTypeSint64   => "PbTypeSint64"
+
+// The default a field of this family holds when nothing arrived.
+fn zero_of(t: PbFieldType) -> Str
+    match family(t)
+        "real"   => "0.0"
+        "flag"   => "false"
+        "text"   => "\"\""
+        "octets" => "bytes.zeros(0)"
+        _        => "0"
+
+// The condition under which a plain field is written: it is not zero.
+fn nonzero(t: PbFieldType, x: Str) -> Str
+    match family(t)
+        "real"   => "float.to_bits(${x}) != 0"
+        "flag"   => x
+        "text"   => "${x} != \"\""
+        "octets" => "bytes.len(${x}) != 0"
+        _        => "${x} != 0"
+
+// The size of one element `x` of field `f`.
+fn one_len(c: PbCtx, f: PbField, x: Str) -> Str
+    let n = f.number
+    let t = type_const(f.field_type)
+    match family(f.field_type)
+        "real"    => "pbcodec.real_len(${n}, ${t})"
+        "flag"    => "pbcodec.flag_len(${n})"
+        "text"    => "pbcodec.text_len(${n}, ${x})"
+        "octets"  => "pbcodec.octets_len(${n}, ${x})"
+        "message" => "pbcodec.nested_len(${n}, ${call(c, f.type_name, len_fn_name(f.type_name))}(${x}))"
+        _         => "pbcodec.int_len(${n}, ${t}, ${x})"
+
+// Write one element `x` of field `f`, as statements.
+fn one_write(var s: PbSrc, indent: Int, c: PbCtx, f: PbField, x: Str)
+    let n = f.number
+    let t = type_const(f.field_type)
+    match family(f.field_type)
+        "real"    => emit(s, indent, "n = n + pbcodec.write_real(${n}, ${t}, ${x}, dst)!")
+        "flag"    => emit(s, indent, "n = n + pbwrite.write_bool_field(${n}, ${x}, dst)!")
+        "text"    => emit(s, indent, "n = n + pbwrite.write_string_field(${n}, ${x}, dst)!")
+        "octets"  => emit(s, indent, "n = n + pbwrite.write_bytes_field(${n}, ${x}, dst)!")
+        "message" =>
+            let len = "${call(c, f.type_name, len_fn_name(f.type_name))}(${x})"
+            emit(s, indent, "n = n + pbcodec.write_nested_head(${n}, ${len}, dst)!")
+            emit(s, indent, "n = n + ${call(c, f.type_name, write_fn_name(f.type_name))}(${x}, dst)!")
+        _         => emit(s, indent, "n = n + pbcodec.write_int(${n}, ${t}, ${x}, dst)!")
+
+// The members of the oneof at `index`, in field-number order.
+fn members(m: PbMessage, index: Int) -> [PbField]
+    var out: [PbField] = []
+    for f in by_number(m)
+        if f.oneof_index == index
+            list.push(out, f)
+    out
+
+// The message's fields in field-number order.
+fn by_number(m: PbMessage) -> [PbField]
+    var out: [PbField] = list.clone(m.fields)
+    list.sort_by(out, (f) => f.number)
+    out
+
+fn gen_message(var s: PbSrc, c: PbCtx, m: PbMessage)
+    let t = novo_type_name(m.full_name)
+    let syntax = c.file.syntax
+    let entry = m.map_entry
+    for i in 0..list.len(m.oneofs)
+        let o = m.oneofs[i]
+        if not o.synthetic
+            emit(s, 0, "")
+            emit(s, 0, "// The oneof ${o.name} of ${dotless(m.full_name)}.")
+            emit(s, 0, "pub enum ${novo_oneof_type_name(m.full_name, o.name)}")
+            for f in members(m, i)
+                let v = novo_oneof_variant_name(m.full_name, o.name, f.name)
+                emit(s, 4, "${v}(v: ${element_type(f)})")
+    emit(s, 0, "")
+    emit(s, 0, "// The message ${dotless(m.full_name)}.")
+    emit(s, 0, "pub struct ${t}")
+    var inits: [Str] = []
+    var oneofs_done: [Int] = []
+    for f in m.fields
+        let name = novo_field_name(f.name)
+        match shape_of(c.set, m, f, syntax)
+            PbMember(i) =>
+                if not list.contains(oneofs_done, i)
+                    list.push(oneofs_done, i)
+                    let o = m.oneofs[i].name
+                    emit(s, 4, "var ${novo_field_name(o)}: ?${novo_oneof_type_name(m.full_name, o)}")
+                    list.push(inits, "${novo_field_name(o)}: None")
+            PbRepeated  =>
+                emit(s, 4, "var ${name}: ${novo_field_type(c.set, f, syntax)}")
+                list.push(inits, "${name}: []")
+            PbOptional  =>
+                emit(s, 4, "var ${name}: ?${element_type(f)}")
+                list.push(inits, "${name}: None")
+            PbPlain     =>
+                emit(s, 4, "var ${name}: ${element_type(f)}")
+                list.push(inits, "${name}: ${zero_of(f.field_type)}")
+    if not entry
+        emit(s, 4, "var ${unknown_field_name()}: PbUnknownSet")
+        list.push(inits, "${unknown_field_name()}: pbunknown.empty()")
+    emit(s, 0, "")
+    emit(s, 0, "// The message ${dotless(m.full_name)} with every field at its default.")
+    emit(s, 0, "pub fn ${new_fn_name(m.full_name)}() -> ${t}")
+    literal(s, 4, "", t, inits)
+    gen_len(s, c, m, t)
+    gen_write(s, c, m, t)
+    emit(s, 0, "")
+    emit(s, 0, "// The encoding of a ${dotless(m.full_name)}, as a new buffer.")
+    emit(s, 0, "pub fn ${encode_fn_name(m.full_name)}(m: ${t}) -> Result<Bytes, PbEncodeError>")
+    emit(s, 4, "var c = bytes.cursor_le(bytes.zeros(${len_fn_name(m.full_name)}(m)))")
+    emit(s, 4, "let _ = ${write_fn_name(m.full_name)}(m, c)!")
+    emit(s, 4, "Ok(c.finish())")
+    gen_decode(s, c, m, t)
+
+fn gen_len(var s: PbSrc, c: PbCtx, m: PbMessage, t: Str)
+    let syntax = c.file.syntax
+    emit(s, 0, "")
+    emit(s, 0, "// How many bytes the encoding of a ${dotless(m.full_name)} occupies.")
+    emit(s, 0, "pub fn ${len_fn_name(m.full_name)}(m: ${t}) -> Int")
+    emit(s, 4, "var n = 0")
+    var oneofs_done: [Int] = []
+    for f in by_number(m)
+        let x = "m.${novo_field_name(f.name)}"
+        let fam = family(f.field_type)
+        let ft = type_const(f.field_type)
+        let packed = if pbdesc.packed_of(f, syntax) then "true" else "false"
+        match shape_of(c.set, m, f, syntax)
+            PbPlain     =>
+                if m.map_entry
+                    emit(s, 4, "n = n + ${one_len(c, f, x)}")
+                else
+                    emit(s, 4, "if ${nonzero(f.field_type, x)}")
+                    emit(s, 8, "n = n + ${one_len(c, f, x)}")
+            PbOptional  =>
+                emit(s, 4, "if let Some(v) = ${x}")
+                emit(s, 8, "n = n + ${one_len(c, f, "v")}")
+            PbRepeated  =>
+                if fam == "int"
+                    emit(s, 4, "n = n + pbcodec.ints_len(${f.number}, ${ft}, ${x}, ${packed})")
+                else if fam == "real"
+                    emit(s, 4, "n = n + pbcodec.reals_len(${f.number}, ${ft}, ${x}, ${packed})")
+                else if fam == "flag"
+                    emit(s, 4, "n = n + pbcodec.flags_len(${f.number}, ${x}, ${packed})")
+                else
+                    emit(s, 4, "for v in ${x}")
+                    emit(s, 8, "n = n + ${one_len(c, f, "v")}")
+            PbMember(i) =>
+                if not list.contains(oneofs_done, i)
+                    list.push(oneofs_done, i)
+                    let o = m.oneofs[i].name
+                    emit(s, 4, "match m.${novo_field_name(o)}")
+                    var pats: [Str] = []
+                    for mf in members(m, i)
+                        list.push(pats, "Some(${novo_oneof_variant_name(m.full_name, o, mf.name)}(v))")
+                    list.push(pats, "None")
+                    let w = widest(pats)
+                    let ms = members(m, i)
+                    for k in 0..list.len(ms)
+                        emit(s, 8, str.pad_right(pats[k], w, " ") + " =>")
+                        emit(s, 12, "n = n + ${one_len(c, ms[k], "v")}")
+                    emit(s, 8, str.pad_right("None", w, " ") + " => ()")
+    if m.map_entry
+        emit(s, 4, "n")
+    else
+        emit(s, 4, "n + pbunknown.encoded_len(m.${unknown_field_name()})")
+
+fn widest(pats: [Str]) -> Int
+    var w = 0
+    for p in pats
+        if str.len(p) > w
+            w = str.len(p)
+    w
+
+fn gen_write(var s: PbSrc, c: PbCtx, m: PbMessage, t: Str)
+    let syntax = c.file.syntax
+    emit(s, 0, "")
+    emit(s, 0, "// Write the encoding of a ${dotless(m.full_name)} at the cursor.")
+    signature(s, "pub fn ${write_fn_name(m.full_name)}", ["m: ${t}", "var dst: Cursor"],
+        " -> Result<Int, PbEncodeError>")
+    emit(s, 4, "var n = 0")
+    var oneofs_done: [Int] = []
+    for f in by_number(m)
+        let x = "m.${novo_field_name(f.name)}"
+        let fam = family(f.field_type)
+        let ft = type_const(f.field_type)
+        let packed = if pbdesc.packed_of(f, syntax) then "true" else "false"
+        match shape_of(c.set, m, f, syntax)
+            PbPlain     =>
+                if m.map_entry
+                    one_write(s, 4, c, f, x)
+                else
+                    emit(s, 4, "if ${nonzero(f.field_type, x)}")
+                    one_write(s, 8, c, f, x)
+            PbOptional  =>
+                emit(s, 4, "if let Some(v) = ${x}")
+                one_write(s, 8, c, f, "v")
+            PbRepeated  =>
+                if fam == "int"
+                    emit(s, 4, "n = n + pbcodec.write_ints(${f.number}, ${ft}, ${x}, ${packed}, dst)!")
+                else if fam == "real"
+                    emit(s, 4, "n = n + pbcodec.write_reals(${f.number}, ${ft}, ${x}, ${packed}, dst)!")
+                else if fam == "flag"
+                    emit(s, 4, "n = n + pbcodec.write_flags(${f.number}, ${x}, ${packed}, dst)!")
+                else
+                    emit(s, 4, "for v in ${x}")
+                    one_write(s, 8, c, f, "v")
+            PbMember(i) =>
+                if not list.contains(oneofs_done, i)
+                    list.push(oneofs_done, i)
+                    let o = m.oneofs[i].name
+                    emit(s, 4, "match m.${novo_field_name(o)}")
+                    var pats: [Str] = []
+                    for mf in members(m, i)
+                        list.push(pats, "Some(${novo_oneof_variant_name(m.full_name, o, mf.name)}(v))")
+                    list.push(pats, "None")
+                    let w = widest(pats)
+                    let ms = members(m, i)
+                    for k in 0..list.len(ms)
+                        emit(s, 8, str.pad_right(pats[k], w, " ") + " =>")
+                        one_write(s, 12, c, ms[k], "v")
+                    emit(s, 8, str.pad_right("None", w, " ") + " => ()")
+    if not m.map_entry
+        emit(s, 4, "n = n + pbwrite.write_unknown(m.${unknown_field_name()}, dst)!")
+    emit(s, 4, "Ok(n)")
+
+// The expression that reads one element of field `f` from piece `p`,
+// and whether it is a `Result` to unwrap.
+fn read_expr(f: PbField) -> Str
+    let t = type_const(f.field_type)
+    match family(f.field_type)
+        "real"    => "pbcodec.real_of(p, ${t})"
+        "flag"    => "pbcodec.flag_of(p)"
+        "text"    => "pbcodec.text_of(p, limits)!"
+        "octets"  => "pbcodec.octets_of(p)"
+        "message" => "pbcodec.octets_of(p)"
+        _         => "pbcodec.int_of(p, ${t})"
+
+fn gen_decode(var s: PbSrc, c: PbCtx, m: PbMessage, t: Str)
+    let syntax = c.file.syntax
+    emit(s, 0, "")
+    emit(s, 0, "// Read a ${dotless(m.full_name)} from the whole of `src`.")
+    signature(s, "pub fn ${decode_fn_name(m.full_name)}", ["src: Bytes", "limits: PbLimits"],
+        " -> Result<${t}, PbDecodeError>")
+    emit(s, 4, "var m = ${new_fn_name(m.full_name)}()")
+    var merged: [PbField] = []
+    for f in m.fields
+        if f.field_type == PbTypeMessage and shape_of(c.set, m, f, syntax) == PbOptional
+            list.push(merged, f)
+            emit(s, 4, "var raw_${f.number}: ?Bytes = None")
+    emit(s, 4, "for p in pbcodec.pieces(src, limits)!")
+    if list.len(m.fields) > 0
+        emit(s, 8, "let f = p.tag.field")
+    var first = true
+    for f in by_number(m)
+        let kw = if first then "if" else "else if"
+        first = false
+        emit(s, 8, "${kw} f == ${f.number}")
+        gen_take(s, c, m, f, syntax)
+    if not m.map_entry
+        emit(s, 8, "m.${unknown_field_name()} = pbcodec.keep(m.${unknown_field_name()}, src, p)")
+    for f in merged
+        let x = "m.${novo_field_name(f.name)}"
+        emit(s, 4, "if let Some(b) = raw_${f.number}")
+        emit(s, 8, "let sub = ${call(c, f.type_name, decode_fn_name(f.type_name))}(b, pbcodec.nested(limits, 0)!)!")
+        emit(s, 8, "${x} = Some(sub)")
+    emit(s, 4, "Ok(m)")
+
+// The statements that take field `f` from piece `p`.
+fn gen_take(var s: PbSrc, c: PbCtx, m: PbMessage, f: PbField, syntax: PbSyntax)
+    let x = "m.${novo_field_name(f.name)}"
+    let fam = family(f.field_type)
+    let ft = type_const(f.field_type)
+    let done = if m.map_entry then "" else "continue"
+    let shape = shape_of(c.set, m, f, syntax)
+    if shape == PbRepeated and (fam == "int" or fam == "real" or fam == "flag")
+        let e = if fam == "int" then "pbcodec.ints_of(p, ${ft})!" else if fam == "real" then "pbcodec.reals_of(p, ${ft})!" else "pbcodec.flags_of(p)!"
+        emit(s, 12, "if let Some(vs) = ${e}")
+        emit(s, 16, "list.append(${x}, vs)")
+        if done != ""
+            emit(s, 16, done)
+        return
+    emit(s, 12, "if let Some(v) = ${read_expr(f)}")
+    let value = if fam == "octets" then "bytes.clone(v)" else "v"
+    match shape
+        PbPlain     => emit(s, 16, "${x} = ${value}")
+        PbOptional  =>
+            if fam == "message"
+                emit(s, 16, "raw_${f.number} = Some((raw_${f.number} ?? bytes.zeros(0)) + v)")
+            else
+                emit(s, 16, "${x} = Some(${value})")
+        PbRepeated  =>
+            if fam == "message"
+                let dec = call(c, f.type_name, decode_fn_name(f.type_name))
+                emit(s, 16, "let e = ${dec}(v, pbcodec.nested(limits, p.at)!)!")
+                emit(s, 16, "list.push(${x}, e)")
+            else
+                emit(s, 16, "list.push(${x}, ${value})")
+        PbMember(i) =>
+            let o = m.oneofs[i].name
+            let variant = novo_oneof_variant_name(m.full_name, o, f.name)
+            if fam == "message"
+                let dec = call(c, f.type_name, decode_fn_name(f.type_name))
+                emit(s, 16, "let e = ${dec}(v, pbcodec.nested(limits, p.at)!)!")
+                emit(s, 16, "m.${novo_field_name(o)} = Some(${variant}(v: e))")
+            else
+                emit(s, 16, "m.${novo_field_name(o)} = Some(${variant}(v: ${value}))")
+    if done != ""
+        emit(s, 16, done)

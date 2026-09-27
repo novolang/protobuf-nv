@@ -1,0 +1,17 @@
+syntax = "proto2";
+
+package legacy;
+
+message Old {
+  required int32 id = 1;
+  optional string label = 2 [default = "none"];
+  repeated int32 codes = 3;
+  optional group Extra = 4 {
+    optional int32 depth = 5;
+  }
+  extensions 100 to 199;
+}
+
+extend Old {
+  optional int32 flavour = 100;
+}

@@ -1,0 +1,282 @@
+// tests/oracle_tests.nv — this package against protoc and Google's
+// protobuf module.
+//
+// The vectors at the end of this file are the descriptor sets protoc
+// wrote for tests/proto and the messages Python serialised from them.  A set read
+// here and written back must be protoc's bytes, and a message decoded
+// here and encoded again must be Python's bytes.
+
+use std.test
+use std.bytes
+use pbwire
+use pbread
+use pbunknown
+use pbdesc
+use pbdyn
+use pbgen
+use pberr
+
+fn hex(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+fn order_set() -> PbFileSet
+    match pbdesc.parse_file_set(hex(order_set_hex()), pbread.default_limits())
+        Ok(s)  => s
+        Err(e) =>
+            test.fail(e.message())
+            PbFileSet { files: [] }
+
+fn legacy_set() -> PbFileSet
+    match pbdesc.parse_file_set(hex(legacy_set_hex()), pbread.default_limits())
+        Ok(s)  => s
+        Err(e) =>
+            test.fail(e.message())
+            PbFileSet { files: [] }
+
+fn order() -> PbMessage
+    match pbdesc.find_message(order_set(), ".acme.Order")
+        Some(m) => m
+        None    =>
+            test.fail("the set declares .acme.Order")
+            pbdesc.all_messages(order_set().files[0])[0]
+
+fn field(name: Str) -> PbField
+    match pbdesc.field_by_name(order(), name)
+        Some(f) => f
+        None    =>
+            test.fail("acme.Order declares ${name}")
+            order().fields[0]
+
+@test
+fn test_protoc_s_descriptor_set_reads_with_its_import_first()
+    let set = order_set()
+    test.assert_eq(set.files.len(), 2)
+    test.assert_eq(set.files[0].name, "acme/money.proto")
+    test.assert_eq(set.files[1].name, "acme/order.proto")
+    test.assert_eq(set.files[1].dependency[0], "acme/money.proto")
+    test.assert_eq(pbdesc.syntax_name(set.files[1].syntax), "proto3")
+    test.assert_eq(set.files[1].package, "acme")
+    test.assert_eq(pbdesc.validate(set).len(), 0)
+
+@test
+fn test_a_set_written_back_is_protoc_s_own_bytes()
+    match pbdesc.write_file_set(order_set())
+        Ok(raw) => test.assert_eq(bytes.to_hex(raw), order_set_hex())
+        Err(e)  => test.fail(e.message())
+    match pbdesc.write_file_set(legacy_set())
+        Ok(raw) => test.assert_eq(bytes.to_hex(raw), legacy_set_hex())
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_the_fields_read_as_descriptor_proto_says()
+    let m = order()
+    test.assert_eq(m.fields.len(), 30)
+    test.assert_eq(field("deltas").field_type == PbTypeSint32, true)
+    test.assert_eq(pbdesc.packed_of(field("deltas"), PbProto3), true)
+    test.assert_eq(pbdesc.packed_of(field("loose"), PbProto3), false)
+    test.assert_eq(field("loose").packed_set, true)
+    test.assert_eq(field("total").type_name, ".acme.Money")
+    test.assert_eq(field("f32").json_name, "f32")
+    test.assert_eq(field("sf64").json_name, "sf64")
+    test.assert_eq(pbdesc.has_presence(field("gift"), PbProto3), true)
+    test.assert_eq(pbdesc.has_presence(field("id"), PbProto3), false)
+    test.assert_eq(m.reserved_ranges[0].first, 100)
+    test.assert_eq(m.reserved_ranges[0].last, 105)
+    test.assert_eq(m.reserved_names[0], "legacy")
+
+@test
+fn test_oneofs_real_and_synthetic()
+    let m = order()
+    test.assert_eq(m.oneofs.len(), 3)
+    test.assert_eq(m.oneofs[0].name, "payment")
+    test.assert_eq(m.oneofs[0].synthetic, false)
+    test.assert_eq(m.oneofs[1].synthetic, true)
+    test.assert_eq(m.oneofs[2].synthetic, true)
+    test.assert_eq(pbdesc.oneof_fields(m, 0).len(), 3)
+
+@test
+fn test_maps_are_found_through_their_entry_messages()
+    let set = order_set()
+    test.assert_eq(pbdesc.is_map_field(set, field("tags")), true)
+    test.assert_eq(pbdesc.is_map_field(set, field("items")), false)
+    match pbdesc.map_key_field(set, field("ledger"))
+        Some(k) => test.assert_eq(k.field_type == PbTypeInt64, true)
+        None    => test.fail("ledger is a map")
+    match pbdesc.map_value_field(set, field("ledger"))
+        Some(v) => test.assert_eq(v.type_name, ".acme.Money")
+        None    => test.fail("ledger is a map")
+    match pbdesc.find_message(set, ".acme.Order.TagsEntry")
+        Some(e) => test.assert_eq(e.map_entry, true)
+        None    => test.fail("protoc makes TagsEntry")
+
+@test
+fn test_enums_and_services_read_whole()
+    let set = order_set()
+    match pbdesc.find_enum(set, ".acme.Currency")
+        Some(e) =>
+            test.assert_eq(e.values.len(), 4)
+            test.assert_eq(e.values[3].number, 0 - 3)
+            test.assert_eq(e.zero_value, "CURRENCY_UNSPECIFIED")
+        None    => test.fail("the set declares .acme.Currency")
+    match pbdesc.find_service(set, ".acme.Orders")
+        Some(s) =>
+            match pbdesc.find_method(s, "Watch")
+                Some(w) =>
+                    test.assert_eq(w.streaming == PbServerStream, true)
+                    test.assert_eq(w.input_type, ".acme.Order")
+                None    => test.fail("Orders declares Watch")
+        None    => test.fail("the set declares .acme.Orders")
+
+@test
+fn test_proto2_groups_defaults_and_extensions()
+    let set = legacy_set()
+    let f = set.files[0]
+    test.assert_eq(pbdesc.syntax_name(f.syntax), "proto2")
+    test.assert_eq(pbdesc.has_extensions(f), true)
+    test.assert_eq(f.extensions[0].extendee, ".legacy.Old")
+    match pbdesc.find_message(set, ".legacy.Old")
+        Some(m) =>
+            test.assert_eq(m.extension_ranges[0].first, 100)
+            test.assert_eq(m.extension_ranges[0].last, 199)
+            match pbdesc.field_by_name(m, "label")
+                Some(l) => test.assert_eq(l.default_value, "none")
+                None    => test.fail("Old declares label")
+            match pbdesc.field_by_number(m, 4)
+                Some(g) => test.assert_eq(g.field_type == PbTypeGroup, true)
+                None    => test.fail("Old declares the group Extra")
+        None    => test.fail("the set declares .legacy.Old")
+    test.assert_eq(pbdesc.validate(set).len(), 0)
+
+// ── the dynamic message against Python's bytes ──────────────────────
+
+fn decoded(set: PbFileSet, name: Str, h: Str) -> PbDynamic
+    match pbdyn.decode(set, name, hex(h), pbread.default_limits())
+        Ok(m)  => m
+        Err(e) =>
+            test.fail(e.message())
+            pbdyn.message(name)
+
+fn reencoded(set: PbFileSet, m: PbDynamic) -> Str
+    match pbdyn.encode(set, m)
+        Ok(b)  => bytes.to_hex(b)
+        Err(e) =>
+            test.fail(e.message())
+            ""
+
+@test
+fn test_python_s_messages_decode_and_encode_back_to_the_same_bytes()
+    let set = order_set()
+    for h in [order_full_hex(), order_empty_hex(),
+              order_voucher_hex(), order_unknown_hex()]
+        test.assert_eq(reencoded(set, decoded(set, ".acme.Order", h)), h)
+    let legacy = legacy_set()
+    let old = decoded(legacy, ".legacy.Old", legacy_old_hex())
+    test.assert_eq(reencoded(legacy, old), legacy_old_hex())
+
+@test
+fn test_python_s_values_read_as_the_numbers_python_wrote()
+    let set = order_set()
+    let m = decoded(set, ".acme.Order", order_full_hex())
+    test.assert_eq(pbdyn.get(m, 1) == Some(PbNum(v: 150)), true)
+    test.assert_eq(pbdyn.get(m, 2) == Some(PbText(v: "testing")), true)
+    test.assert_eq(pbdyn.get(m, 14) == Some(PbNum(v: 4294967295)), true)
+    match pbdyn.get(m, 15)
+        Some(PbNum(v)) => test.assert_eq(pbdyn.uint64_text(v), "18446744073709551615")
+        _              => test.fail("big is a uint64")
+    test.assert_eq(pbdyn.get(m, 16) == Some(PbNum(v: 0 - 9223372036854775807 - 1)), true)
+    test.assert_eq(pbdyn.get(m, 12) == Some(PbReal(v: 1.5)), true)
+    test.assert_eq(pbdyn.get(m, 25) == Some(PbEnumOf(number: 0 - 3, name: "CURRENCY_OLD")), true)
+    match pbdyn.get(m, 4)
+        Some(PbList(items)) => test.assert_eq(items[1] == PbNum(v: 0 - 270), true)
+        _                   => test.fail("deltas is repeated")
+    match pbdyn.get(m, 5)
+        Some(PbMap(entries)) =>
+            test.assert_eq(entries[0].key == PbText(v: "a"), true)
+            test.assert_eq(entries[0].value == PbNum(v: 1), true)
+        _                    => test.fail("tags is a map")
+    match pbdyn.get(m, 3)
+        Some(PbNested(total)) => test.assert_eq(pbdyn.get(total, 3) == Some(PbNum(v: 0 - 2147483648)), true)
+        _                     => test.fail("total is a message")
+    test.assert_eq(pbdyn.which_oneof(set, m, "payment") == Some(6), true)
+    test.assert_eq(pbdyn.has(m, 8), true)
+    test.assert_eq(pbdyn.get_by_name(set, m, "loop") == Some(PbFlag(v: true)), true)
+
+@test
+fn test_fields_a_schema_does_not_declare_travel_on()
+    let set = order_set()
+    let m = decoded(set, ".acme.Order", order_unknown_hex())
+    test.assert_eq(pbunknown.count(m.unknown), 2)
+    test.assert_eq(pbunknown.has_number(m.unknown, 111), true)
+
+@test
+fn test_a_proto2_group_and_an_extension_read_by_descriptor()
+    let set = legacy_set()
+    let m = decoded(set, ".legacy.Old", legacy_old_hex())
+    match pbdyn.get(m, 4)
+        Some(PbNested(g)) => test.assert_eq(pbdyn.get(g, 5) == Some(PbNum(v: 9)), true)
+        _                 => test.fail("Extra is a group")
+    // The extension is not a field of Old, so it is kept.
+    test.assert_eq(pbunknown.has_number(m.unknown, 100), true)
+    test.assert_eq(pbdyn.get(m, 2) == Some(PbText(v: "hi")), true)
+
+// ── the generator over protoc's set ─────────────────────────────────
+
+@test
+fn test_the_generator_writes_a_module_per_file_and_per_service()
+    match pbgen.generate_set(order_set(), pbgen.default_options())
+        Ok(out) =>
+            test.assert_eq(out.len(), 3)
+            test.assert_eq(out[0].module, "acme_money")
+            test.assert_eq(out[1].path, "acme_order.nv")
+            test.assert_eq(out[2].module, "acme_order_orders")
+            test.assert_eq(str.contains(out[1].source, "pub struct AcmeOrder\n"), true)
+            test.assert_eq(str.contains(out[1].source, "var loop_: Bool"), true)
+            test.assert_eq(str.contains(out[1].source, "use acme_money"), true)
+            test.assert_eq(str.contains(out[1].source, "acme_money.decode_acme_money("), true)
+            test.assert_eq(str.contains(out[0].source, "AcmeCurrencyOld         => 0 - 3"), true)
+            test.assert_eq(str.contains(out[2].source, "\"/acme.Orders/Watch\""), true)
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_the_generator_refuses_a_group_and_an_extension()
+    let f = legacy_set().files[0]
+    let rs = pbgen.refusals(f)
+    test.assert_eq(rs.len(), 2)
+    test.assert_eq(pberr.schema_path(rs[0]), "flavour")
+    test.assert_eq(pberr.schema_path(rs[1]), "legacy.Old.extra")
+    test.assert_eq(pbgen.generate(f).len(), 0)
+    match pbgen.generate_set(legacy_set(), pbgen.default_options())
+        Ok(_)  => test.fail("an extension is not generated")
+        Err(e) => test.assert_eq(str.contains(e.message(), "an extension"), true)
+
+// ── the vectors: protoc's descriptor sets and Python's messages ──
+//
+// tools/vectors.py writes everything below this line from tests/proto.
+
+// The descriptor set of legacy, with its imports.
+fn legacy_set_hex() -> Str
+    "0ad6010a0c6c65676163792e70726f746f12066c65676163792296010a034f6c64120e0a02696418012002280552026964121a0a056c6162656c1802200128093a046e6f6e6552056c6162656c12140a05636f6465731803200328055205636f64657312270a05657874726118042001280a32112e6c65676163792e4f6c642e4578747261520565787472611a1d0a05457874726112140a056465707468180520012805520564657074682a05086410c8013a250a07666c61766f7572120b2e6c65676163792e4f6c641864200128055207666c61766f7572"
+
+// The descriptor set of order, with its imports.
+fn order_set_hex() -> Str
+    "0ae6010a1061636d652f6d6f6e65792e70726f746f120461636d65225f0a054d6f6e657912140a05756e6974731801200128035205756e697473122a0a0863757272656e637918022001280e320e2e61636d652e43757272656e6379520863757272656e637912140a056e616e6f7318032001280f52056e616e6f732a630a0843757272656e637912180a1443555252454e43595f554e535045434946494544100012100a0c43555252454e43595f455552100112100a0c43555252454e43595f555344100212190a0c43555252454e43595f4f4c4410fdffffffffffffffff01620670726f746f330a98090a1061636d652f6f726465722e70726f746f120461636d651a1061636d652f6d6f6e65792e70726f746f2293080a054f72646572120e0a0269641801200128055202696412120a046e616d6518022001280952046e616d6512210a05746f74616c18032001280b320b2e61636d652e4d6f6e65795205746f74616c12160a0664656c746173180420032811520664656c74617312290a047461677318052003280b32152e61636d652e4f726465722e54616773456e74727952047461677312140a0463617264180620012809480052046361726412140a0463617368180720012803480052046361736812270a07766f756368657218142001280b320b2e61636d652e4d6f6e657948005207766f756368657212170a0467696674180820012808480152046769667488010112210a056974656d7318092003280b320b2e61636d652e4d6f6e657952056974656d7312120a04626c6f62180a2001280c5204626c6f6212140a05726174696f180b200128015205726174696f12160a06776569676874180c20012802520677656967687412140a056e6f746573180d2003280952056e6f74657312140a05636f756e74180e2001280d5205636f756e7412100a03626967180f20012804520362696712140a0564726966741810200128125205647269667412100a03663332181120012807520366333212100a03663634181220012806520366363412120a047366363418132001281052047366363412180a0773616d706c6573181520032801520773616d706c657312140a05666c6167731816200328085205666c61677312180a056c6f6f73651817200328054202100052056c6f6f7365122f0a066c656467657218182003280b32172e61636d652e4f726465722e4c6564676572456e74727952066c6564676572122a0a0863757272656e637918192001280e320e2e61636d652e43757272656e6379520863757272656e637912280a07686973746f7279181a2003280e320e2e61636d652e43757272656e63795207686973746f727912170a046d656d6f181b20012809480252046d656d6f88010112230a06706172656e74181c2001280b320b2e61636d652e4f726465725206706172656e7412260a056c696e6573181d2003280b32102e61636d652e4f726465722e4c696e6552056c696e657312120a046c6f6f70181e2001280852046c6f6f701a370a0954616773456e74727912100a036b657918012001280952036b657912140a0576616c7565180220012805520576616c75653a0238011a460a0b4c6564676572456e74727912100a036b657918012001280352036b657912210a0576616c756518022001280b320b2e61636d652e4d6f6e6579520576616c75653a0238011a2a0a044c696e6512100a03736b751801200128095203736b7512100a0371747918022001280d520371747942090a077061796d656e7442070a055f6769667442070a055f6d656d6f4a040864106a52066c6567616379324e0a064f7264657273121f0a03476574120b2e61636d652e4f726465721a0b2e61636d652e4f7264657212230a055761746368120b2e61636d652e4f726465721a0b2e61636d652e4f726465723001620670726f746f33"
+
+// The message legacy_old.
+fn legacy_old_hex() -> Str
+    "0805120268691801180223280924a00603"
+
+// The message order_empty.
+fn order_empty_hex() -> Str
+    ""
+
+// The message order_full.
+fn order_full_hex() -> Str
+    "089601120774657374696e671a1208fbffffffffffffffff0110011d000000802206069b04bcce0a2a050a0161100132047669736140004a020801520200ff59000000000000e03f650000c03f6a01786a02c3bf70ffffffff0f78ffffffffffffffffff018001ffffffffffffffffff018d0107000000910108000000000000009901ffffffffffffffffaa0110000000000000f03f00000000000004c0b201020100b801ffffffffffffffffff01b80102c2010f08f9ffffffffffffffff0112020809c801fdffffffffffffffff01d201020107da01016de201020801ea01050a016b1003f00101"
+
+// The message order_unknown.
+fn order_unknown_hex() -> Str
+    "0801f8060a8a0703616263"
+
+// The message order_voucher.
+fn order_voucher_hex() -> Str
+    "08ffffffffffffffffff01a201020802"

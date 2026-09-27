@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package acme;
+
+import "acme/money.proto";
+
+message Order {
+  int32 id = 1;
+  string name = 2;
+  Money total = 3;
+  repeated sint32 deltas = 4;
+  map<string, int32> tags = 5;
+  oneof payment {
+    string card = 6;
+    int64 cash = 7;
+    Money voucher = 20;
+  }
+  optional bool gift = 8;
+  repeated Money items = 9;
+  bytes blob = 10;
+  double ratio = 11;
+  float weight = 12;
+  repeated string notes = 13;
+  uint32 count = 14;
+  uint64 big = 15;
+  sint64 drift = 16;
+  fixed32 f32 = 17;
+  fixed64 f64 = 18;
+  sfixed64 sf64 = 19;
+  repeated double samples = 21;
+  repeated bool flags = 22;
+  repeated int32 loose = 23 [packed = false];
+  map<int64, Money> ledger = 24;
+  Currency currency = 25;
+  repeated Currency history = 26;
+  optional string memo = 27;
+  Order parent = 28;
+  message Line {
+    string sku = 1;
+    uint32 qty = 2;
+  }
+  repeated Line lines = 29;
+  bool loop = 30;
+  reserved 100 to 105;
+  reserved "legacy";
+}
+
+service Orders {
+  rpc Get(Order) returns (Order);
+  rpc Watch(Order) returns (stream Order);
+}
