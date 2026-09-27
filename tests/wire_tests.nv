@@ -270,7 +270,7 @@ fn test_utf8_is_rfc_3629_s()
     // A lone continuation byte, an overlong two-byte form, a
     // surrogate, a value above U+10FFFF, a sequence cut short, and an
     // overlong three- and four-byte form.
-    for h in ["80", "c0af", "eda080", "f4908080", "e282", "e08080", "f0808080", "c3", "e2ffac"]
+    for h in ["80", "c0af", "eda080", "f4908080", "e282", "e08080", "f0808080", "c3", "e2ffac", "e28228"]
         let b = hex(h)
         test.assert_eq(pbwire.first_non_utf8(b, 0, bytes.len(b)), 0)
     let b = hex("61e2")
