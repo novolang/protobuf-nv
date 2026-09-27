@@ -84,11 +84,7 @@ fn fits(p: PbPiece, t: PbFieldType) -> Bool
 
 // The integer a raw payload holds as a value of type `t`.
 fn int_from(v: PbRaw, t: PbFieldType) -> Int
-    let b = match v
-        PbRawVarint(x)  => x
-        PbRawFixed64(x) => x
-        PbRawFixed32(x) => x
-        PbRawBytes(_)   => 0
+    let b = pbread.bits_of(v)
     match t
         PbTypeInt32    => pbwire.int32_of_wire(b)
         PbTypeEnum     => pbwire.int32_of_wire(b)
@@ -109,18 +105,17 @@ pub fn int_of(p: PbPiece, t: PbFieldType) -> ?Int []
         return None
     Some(int_from(p.value, t))
 
-fn real_from(v: PbRaw) -> Float
-    match v
-        PbRawFixed32(b) => pbwire.float_of_bits32(b)
-        PbRawFixed64(b) => float.from_bits(b)
-        _               => 0.0
+fn real_from(v: PbRaw, t: PbFieldType) -> Float
+    if t == PbTypeFloat
+        return pbwire.float_of_bits32(pbread.bits_of(v))
+    float.from_bits(pbread.bits_of(v))
 
 // The number a `double` or `float` piece holds, or `None` when its wire
 // type is not `t`'s.
 pub fn real_of(p: PbPiece, t: PbFieldType) -> ?Float []
     if not fits(p, t)
         return None
-    Some(real_from(p.value))
+    Some(real_from(p.value, t))
 
 // The value a `bool` piece holds, or `None` when it is not a varint.
 pub fn flag_of(p: PbPiece) -> ?Bool []
@@ -163,11 +158,11 @@ pub fn ints_of(p: PbPiece, t: PbFieldType) -> Result<?[Int], PbDecodeError> []
 // packed or not.
 pub fn reals_of(p: PbPiece, t: PbFieldType) -> Result<?[Float], PbDecodeError> []
     if fits(p, t)
-        return Ok(Some([real_from(p.value)]))
+        return Ok(Some([real_from(p.value, t)]))
     let PbRawBytes(d) = p.value else return Ok(None)
     var out: [Float] = []
     for r in pbread.unpack(d, t)!
-        list.push(out, real_from(r))
+        list.push(out, real_from(r, t))
     Ok(Some(out))
 
 // The elements of a repeated `bool` field in one piece, packed or not.

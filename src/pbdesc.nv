@@ -961,6 +961,18 @@ pub fn find_service(set: PbFileSet, full_name: Str) -> ?PbService []
                 return Some(s)
     None
 
+// The file that declares a message or an enum, by its fully-qualified
+// name, or `None`.
+pub fn file_of(set: PbFileSet, full_name: Str) -> ?PbFile []
+    for f in set.files
+        for m in all_messages(f)
+            if m.full_name == full_name
+                return Some(f)
+        for e in all_enums(f)
+            if e.full_name == full_name
+                return Some(f)
+    None
+
 // The method a service declares under this name.
 pub fn find_method(s: PbService, name: Str) -> ?PbMethod []
     for m in s.methods
@@ -1086,11 +1098,12 @@ pub fn map_value_field(set: PbFileSet, f: PbField) -> ?PbField []
     entry_field(set, f, 2)
 
 fn entry_field(set: PbFileSet, f: PbField, number: Int) -> ?PbField
-    if not is_map_field(set, f)
+    if f.label != PbLabelRepeated or f.field_type != PbTypeMessage
         return None
-    match find_message(set, f.type_name)
-        Some(m) => field_by_number(m, number)
-        None    => None
+    let Some(m) = find_message(set, f.type_name) else return None
+    if not m.map_entry
+        return None
+    field_by_number(m, number)
 
 // The JSON name protobuf derives from a `.proto` name: each underscore
 // removed and the letter after it upper-cased, as `protoc` does.

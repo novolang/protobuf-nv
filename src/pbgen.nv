@@ -543,11 +543,8 @@ struct PbCtx
 
 // The module a message or enum is generated into.
 fn module_of(c: PbCtx, full_name: Str) -> Str
-    for f in c.set.files
-        for m in pbdesc.all_messages(f)
-            if m.full_name == full_name
-                return c.opts.module_prefix + novo_module_name(f.name)
-    c.module
+    let name = pbdesc.file_of(c.set, full_name)?.name ?? ""
+    c.opts.module_prefix + novo_module_name(name)
 
 // A generated function's name as a call from this file: bare in its own
 // module, qualified in another.

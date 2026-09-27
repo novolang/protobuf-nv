@@ -93,11 +93,7 @@ pub fn message(type_name: Str) -> PbDynamic []
 
 // The syntax of the file that declares a message.
 fn syntax_of(set: PbFileSet, full_name: Str) -> PbSyntax
-    for f in set.files
-        for m in pbdesc.all_messages(f)
-            if m.full_name == full_name
-                return f.syntax
-    PbProto2
+    pbdesc.file_of(set, full_name)?.syntax ?? PbProto2
 
 // Decode bytes as the named message type.
 //
@@ -132,8 +128,7 @@ fn decode_range(set: PbFileSet, md: PbMessage, src: Bytes, off: Int, len: Int,
                 m = take(set, md, syntax, m, t, v, raw, start, limits, depth)!
                 i = i + 1
             PbGroupStart(f, at)            =>
-                let j = group_end(evs, i)
-                let end_at = event_at(evs[j])
+                let (j, end_at) = group_end(evs, i)
                 let key = pbwire.key_len(pbwire.tag(f, PbWireStartGroup))
                 let close = end_at + pbwire.key_len(pbwire.tag(f, PbWireEndGroup))
                 let t = pbwire.tag(f, PbWireStartGroup)
@@ -157,26 +152,26 @@ fn payload_len(v: PbRaw) -> Int
         PbRawBytes(d) => bytes.len(d)
         _             => 0
 
-fn event_at(ev: PbEvent) -> Int
-    match ev
-        PbFieldSeen(_, _, at, _) => at
-        PbGroupStart(_, at)      => at
-        PbGroupEnd(_, at)        => at
-
-// The index of the event that closes the group opened at `i`.
-fn group_end(evs: [PbEvent], i: Int) -> Int
+// The index of the event that closes the group opened at `i`, and the
+// offset of its end key.  `pbread.walk` answers only balanced groups,
+// so the end is always there.
+fn group_end(evs: [PbEvent], i: Int) -> (Int, Int)
     var depth = 0
     var j = i
-    while j < list.len(evs)
+    var at = 0
+    var found = false
+    while not found
         match evs[j]
-            PbGroupStart(_, _) => depth = depth + 1
-            PbGroupEnd(_, _)   =>
+            PbGroupStart(_, _)       => depth = depth + 1
+            PbGroupEnd(_, a)         =>
                 depth = depth - 1
                 if depth == 0
-                    return j
-            _                  => ()
-        j = j + 1
-    j
+                    found = true
+                    at = a
+            PbFieldSeen(_, _, _, _)  => ()
+        if not found
+            j = j + 1
+    (j, at)
 
 // Take one arrived field into `m`.
 fn take(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m0: PbDynamic, t: PbTag, v: PbRaw,
@@ -188,7 +183,7 @@ fn take(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m0: PbDynamic, t: PbTag
         return Ok(keep(m, t, raw))
     var values: [PbValue] = []
     if packed
-        for r in pbread.unpack(raw_data(v), fd.field_type)!
+        for r in pbread.unpack(pbread.data_of(v), fd.field_type)!
             list.push(values, scalar(set, fd, r))
     else
         list.push(values, value_of(set, fd, v, start, limits, depth)!)
@@ -197,21 +192,9 @@ fn take(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m0: PbDynamic, t: PbTag
 fn keep(m: PbDynamic, t: PbTag, raw: Bytes) -> PbDynamic
     PbDynamic { type_name: m.type_name, fields: m.fields, unknown: pbunknown.keep(m.unknown, t, raw) }
 
-fn raw_data(v: PbRaw) -> readonly Bytes
-    match v
-        PbRawBytes(d) => d
-        _             => bytes.zeros(0)
-
-fn raw_bits(v: PbRaw) -> Int
-    match v
-        PbRawVarint(b)  => b
-        PbRawFixed64(b) => b
-        PbRawFixed32(b) => b
-        PbRawBytes(_)   => 0
-
 // A scalar of a varint or fixed-width type, from its raw bits.
 fn scalar(set: PbFileSet, fd: PbField, v: PbRaw) -> PbValue
-    let b = raw_bits(v)
+    let b = pbread.bits_of(v)
     match fd.field_type
         PbTypeDouble   => PbReal(v: float.from_bits(b))
         PbTypeFloat    => PbReal(v: pbwire.float_of_bits32(b))
@@ -239,16 +222,16 @@ fn value_of(set: PbFileSet, fd: PbField, v: PbRaw, start: Int, limits: PbLimits,
             depth: Int) -> Result<PbValue, PbDecodeError>
     match fd.field_type
         PbTypeString  =>
-            let d = raw_data(v)
+            let d = pbread.data_of(v)
             if limits.check_utf8
                 let bad = pbwire.first_non_utf8(d, 0, bytes.len(d))
                 if bad >= 0
                     return Err(PbNotUtf8(at: start + bad, byte: bytes.byte_at(d, bad) ?? 0))
             Ok(PbText(v: bytes.to_str(d)))
-        PbTypeBytes   => Ok(PbOctets(v: raw_data(v)))
+        PbTypeBytes   => Ok(PbOctets(v: pbread.data_of(v)))
         PbTypeMessage =>
             let Some(sub) = pbdesc.find_message(set, fd.type_name) else return Err(PbNoSuchType(at: start, name: fd.type_name))
-            let n = decode_nested(set, sub, raw_data(v), start, limits, depth + 1)!
+            let n = decode_nested(set, sub, pbread.data_of(v), start, limits, depth + 1)!
             Ok(PbNested(m: n))
         _             => Ok(scalar(set, fd, v))
 
@@ -295,12 +278,10 @@ fn store(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m: PbDynamic, fd: PbFi
 fn entry_of(set: PbFileSet, fd: PbField, v: PbValue) -> PbMapEntry
     let kf = pbdesc.map_key_field(set, fd)
     let vf = pbdesc.map_value_field(set, fd)
-    match v
-        PbNested(e) =>
-            let k = get(e, 1) ?? default_of(set, kf)
-            let val = get(e, 2) ?? default_of(set, vf)
-            PbMapEntry { key: k, value: val }
-        _           => PbMapEntry { key: v, value: v }
+    let PbNested(e) = v else return PbMapEntry { key: v, value: v }
+    let k = get(e, 1) ?? default_of(set, kf)
+    let val = get(e, 2) ?? default_of(set, vf)
+    PbMapEntry { key: k, value: val }
 
 // The zero value of a field's type.
 fn default_of(set: PbFileSet, f: ?PbField) -> PbValue
@@ -729,7 +710,7 @@ pub fn uint64_of_text(s: Str) -> ?Int []
         let d = str.byte_at_or(s, i, 0) - '0'
         if d < 0 or d > 9
             return None
-        if v > 1844674407370955161 or (v == 1844674407370955161 and d > 5)
+        if v < 0 or v > 1844674407370955161 or (v == 1844674407370955161 and d > 5)
             return None
         v = int.wrapping_add(int.wrapping_mul(v, 10), d)
     Some(v)

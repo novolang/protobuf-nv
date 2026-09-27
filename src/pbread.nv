@@ -75,6 +75,29 @@ pub enum PbRaw
     // `0 ..= 2^32 - 1`.
     PbRawFixed32(bits: Int)
 
+// The bit pattern a varint or fixed-width payload holds, or 0 for a
+// length-delimited one.
+//
+// ```novo
+// use pbread
+//
+// fn main() [io]
+//     println("${pbread.bits_of(PbRawFixed32(bits: 7))}")   // 7
+// ```
+pub fn bits_of(v: PbRaw) -> Int []
+    match v
+        PbRawVarint(b)  => b
+        PbRawFixed64(b) => b
+        PbRawFixed32(b) => b
+        PbRawBytes(_)   => 0
+
+// The bytes a length-delimited payload holds, or an empty buffer for
+// another shape.
+pub fn data_of(v: PbRaw) -> readonly Bytes []
+    match v
+        PbRawBytes(d) => d
+        _             => bytes.zeros(0)
+
 // What a reader produced.
 //
 // `PbGroupStart` and `PbGroupEnd` bracket a proto2 group's fields.  A

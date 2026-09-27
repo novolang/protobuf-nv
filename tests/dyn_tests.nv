@@ -1,0 +1,497 @@
+// tests/dyn_tests.nv — the dynamic message over a descriptor built by
+// hand: every type decoded and encoded, the merge rules, presence, and
+// every refusal.
+//
+// The inputs are written with this package's own writers, whose bytes
+// oracle_tests and wire_tests check against protoc, Python and the
+// Encoding page.
+
+use std.test
+use std.bytes
+use pbwire
+use pbread
+use pbunknown
+use pbwrite
+use pbdesc
+use pbdyn
+use pberr
+
+fn fld(name: Str, number: Int, label: PbLabel, t: PbFieldType, type_name: Str) -> PbField
+    PbField { name: name, json_name: name, number: number, label: label, field_type: t,
+        type_name: type_name, extendee: "", oneof_index: 0 - 1, packed_set: false,
+        packed_value: false, proto3_optional: false, default_value: "", deprecated: false }
+
+fn member(name: Str, number: Int, t: PbFieldType, type_name: Str) -> PbField
+    PbField { name: name, json_name: name, number: number, label: PbLabelOptional, field_type: t,
+        type_name: type_name, extendee: "", oneof_index: 0, packed_set: false,
+        packed_value: false, proto3_optional: false, default_value: "", deprecated: false }
+
+fn msg(full: Str, fields: [PbField], entry: Bool) -> PbMessage
+    let parts = str.split(full, ".")
+    PbMessage { name: parts[list.len(parts) - 1], full_name: full, fields: fields,
+        oneofs: [PbOneof { name: "pick", synthetic: false }], nested: [], enums: [],
+        extensions: [], extension_ranges: [], reserved_ranges: [], reserved_names: [],
+        map_entry: entry, deprecated: false, unknown: pbunknown.empty() }
+
+fn opt(n: Str, number: Int, t: PbFieldType) -> PbField
+    fld(n, number, PbLabelOptional, t, "")
+
+fn all_fields() -> [PbField]
+    [opt("i32", 1, PbTypeInt32), opt("u32", 2, PbTypeUint32), opt("s32", 3, PbTypeSint32),
+     opt("s64", 4, PbTypeSint64), opt("b", 5, PbTypeBool),
+     fld("e", 6, PbLabelOptional, PbTypeEnum, ".d.Col"), opt("s", 7, PbTypeString),
+     opt("by", 8, PbTypeBytes), opt("f", 9, PbTypeFloat), opt("dbl", 10, PbTypeDouble),
+     opt("fx", 11, PbTypeFixed32), opt("sfx", 12, PbTypeSfixed32), opt("f64", 13, PbTypeFixed64),
+     fld("leaf", 14, PbLabelOptional, PbTypeMessage, ".d.Leaf"),
+     fld("rep", 15, PbLabelRepeated, PbTypeSint32, ""),
+     fld("dict", 16, PbLabelRepeated, PbTypeMessage, ".d.All.DictEntry"),
+     fld("g", 17, PbLabelOptional, PbTypeGroup, ".d.Leaf"),
+     member("x", 18, PbTypeString, ""), member("y", 19, PbTypeMessage, ".d.Leaf"),
+     fld("names", 20, PbLabelRepeated, PbTypeString, ""),
+     fld("reals", 21, PbLabelRepeated, PbTypeFloat, ""),
+     fld("cols", 22, PbLabelRepeated, PbTypeEnum, ".d.Col"),
+     fld("lost", 23, PbLabelOptional, PbTypeMessage, ".d.Lost"),
+     fld("lostg", 24, PbLabelOptional, PbTypeGroup, ".d.Lost"),
+     fld("half", 25, PbLabelRepeated, PbTypeMessage, ".d.All.HalfEntry"),
+     opt("u64", 26, PbTypeUint64), opt("sf64", 27, PbTypeSfixed64),
+     fld("flags", 28, PbLabelRepeated, PbTypeBool, "")]
+
+fn col() -> PbEnum
+    PbEnum { name: "Col", full_name: ".d.Col", values: [PbEnumValue { name: "Z", number: 0,
+        deprecated: false }, PbEnumValue { name: "ONE", number: 1, deprecated: false }],
+        allow_alias: false, zero_value: "Z", deprecated: false, unknown: pbunknown.empty() }
+
+fn set_of(syntax: PbSyntax) -> PbFileSet
+    let leaf = msg(".d.Leaf", [opt("a", 1, PbTypeInt32), fld("kid", 2, PbLabelOptional,
+        PbTypeMessage, ".d.Leaf")], false)
+    let dict = msg(".d.All.DictEntry", [opt("key", 1, PbTypeString),
+        fld("value", 2, PbLabelOptional, PbTypeMessage, ".d.Leaf")], true)
+    let half = msg(".d.All.HalfEntry", [opt("key", 1, PbTypeInt64)], true)
+    let all = msg(".d.All", all_fields(), false)
+    let f = PbFile { name: "d.proto", package: "d", syntax: syntax, dependency: [],
+        public_dependency: [], messages: [all, leaf, dict, half], enums: [col()], services: [],
+        extensions: [], options: PbFileOptions { deprecated: false, go_package: "",
+            java_package: "", unknown: pbunknown.empty() } }
+    PbFileSet { files: [f] }
+
+fn p3() -> PbFileSet
+    set_of(PbProto3)
+
+fn built(r: Result<PbBuilder, PbEncodeError>) -> PbBuilder
+    match r
+        Ok(b)  => b
+        Err(e) =>
+            test.fail(e.message())
+            pbwrite.builder(pbwrite.build_limits())
+
+fn done(b: PbBuilder) -> Bytes
+    match pbwrite.done(b)
+        Ok(out) => out
+        Err(e)  =>
+            test.fail(e.message())
+            bytes.zeros(0)
+
+fn decoded(set: PbFileSet, src: Bytes) -> PbDynamic
+    match pbdyn.decode(set, ".d.All", src, pbread.default_limits())
+        Ok(m)  => m
+        Err(e) =>
+            test.fail(e.message())
+            pbdyn.message(".d.All")
+
+fn decode_err(set: PbFileSet, src: Bytes, limits: PbLimits) -> PbDecodeError
+    match pbdyn.decode(set, ".d.All", src, limits)
+        Ok(_)  =>
+            test.fail("expected a refusal")
+            PbTruncated(at: 0 - 1, need: 0)
+        Err(e) => e
+
+fn encoded(set: PbFileSet, m: PbDynamic) -> Bytes
+    match pbdyn.encode(set, m)
+        Ok(b)  => b
+        Err(e) =>
+            test.fail(e.message())
+            bytes.zeros(0)
+
+fn encode_err(set: PbFileSet, m: PbDynamic) -> PbEncodeError
+    match pbdyn.encode(set, m)
+        Ok(_)  =>
+            test.fail("expected a refusal")
+            PbBadFieldNumber(field: 0 - 1)
+        Err(e) => e
+
+fn hex(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+// ── decoding every type ─────────────────────────────────────────────
+
+@test
+fn test_every_scalar_type_decodes_by_its_descriptor()
+    var b = pbwrite.builder(pbwrite.build_limits())
+    b = built(pbwrite.put_varint(b, 1, 0 - 1))
+    b = built(pbwrite.put_varint(b, 2, 0 - 1))
+    b = built(pbwrite.put_varint(b, 3, 3))
+    b = built(pbwrite.put_sint(b, 4, 0 - 5))
+    b = built(pbwrite.put_varint(b, 5, 7))
+    b = built(pbwrite.put_varint(b, 6, 1))
+    b = built(pbwrite.put_string(b, 7, "é"))
+    b = built(pbwrite.put_bytes(b, 8, hex("00ff")))
+    b = built(pbwrite.put_fixed(b, 9, PbTypeFloat, pbwire.float32_bits(0.5)))
+    b = built(pbwrite.put_fixed(b, 10, PbTypeDouble, float.to_bits(0.25)))
+    b = built(pbwrite.put_fixed(b, 11, PbTypeFixed32, 4294967295))
+    b = built(pbwrite.put_fixed(b, 12, PbTypeSfixed32, 0 - 1))
+    b = built(pbwrite.put_fixed(b, 13, PbTypeFixed64, 0 - 2))
+    b = built(pbwrite.put_varint(b, 26, 0 - 1))
+    b = built(pbwrite.put_fixed(b, 27, PbTypeSfixed64, 0 - 3))
+    let src = done(b)
+    let m = decoded(p3(), src)
+    test.assert_eq(pbdyn.get(m, 1) == Some(PbNum(v: 0 - 1)), true)
+    test.assert_eq(pbdyn.get(m, 2) == Some(PbNum(v: 4294967295)), true)
+    test.assert_eq(pbdyn.get(m, 3) == Some(PbNum(v: 0 - 2)), true)
+    test.assert_eq(pbdyn.get(m, 4) == Some(PbNum(v: 0 - 5)), true)
+    test.assert_eq(pbdyn.get(m, 5) == Some(PbFlag(v: true)), true)
+    test.assert_eq(pbdyn.get(m, 6) == Some(PbEnumOf(number: 1, name: "ONE")), true)
+    test.assert_eq(pbdyn.get(m, 7) == Some(PbText(v: "é")), true)
+    test.assert_eq(pbdyn.get(m, 9) == Some(PbReal(v: 0.5)), true)
+    test.assert_eq(pbdyn.get(m, 10) == Some(PbReal(v: 0.25)), true)
+    test.assert_eq(pbdyn.get(m, 11) == Some(PbNum(v: 4294967295)), true)
+    test.assert_eq(pbdyn.get(m, 12) == Some(PbNum(v: 0 - 1)), true)
+    test.assert_eq(pbdyn.get(m, 13) == Some(PbNum(v: 0 - 2)), true)
+    test.assert_eq(pbdyn.get(m, 27) == Some(PbNum(v: 0 - 3)), true)
+    match pbdyn.get(m, 8)
+        Some(PbOctets(d)) => test.assert_eq(bytes.to_hex(d), "00ff")
+        _                 => test.fail("by is bytes")
+    // Encoding again writes the uint32 in five bytes where the input
+    // spent ten, and the bool as 1 where the input said 7.
+    let again = encoded(p3(), m)
+    test.assert_eq(bytes.len(again), bytes.len(src) - 5)
+
+@test
+fn test_an_enum_number_the_schema_does_not_name_is_kept_by_number()
+    let m = decoded(p3(), hex("3009"))
+    test.assert_eq(pbdyn.get(m, 6) == Some(PbEnumOf(number: 9, name: "")), true)
+    // An enum type that is not in the set names nothing either.
+    let lone = msg(".d.Lone", [fld("e", 1, PbLabelOptional, PbTypeEnum, ".d.Gone")], false)
+    let set = PbFileSet { files: [PbFile { name: "l.proto", package: "d", syntax: PbProto3,
+        dependency: [], public_dependency: [], messages: [lone], enums: [], services: [],
+        extensions: [], options: PbFileOptions { deprecated: false, go_package: "",
+            java_package: "", unknown: pbunknown.empty() } }] }
+    match pbdyn.decode(set, ".d.Lone", hex("0801"), pbread.default_limits())
+        Ok(x)  => test.assert_eq(pbdyn.get(x, 1) == Some(PbEnumOf(number: 1, name: "")), true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_repeated_fields_read_packed_and_unpacked_and_concatenate()
+    var b = pbwrite.builder(pbwrite.build_limits())
+    b = built(pbwrite.put_packed(b, 15, PbTypeSint32, [1, 0 - 1]))
+    b = built(pbwrite.put_sint(b, 15, 2))
+    b = built(pbwrite.put_string(b, 20, "a"))
+    b = built(pbwrite.put_string(b, 20, "b"))
+    b = built(pbwrite.put_packed(b, 21, PbTypeFloat, [pbwire.float32_bits(1.5)]))
+    b = built(pbwrite.put_packed(b, 22, PbTypeEnum, [0, 1]))
+    let m = decoded(p3(), done(b))
+    match pbdyn.get(m, 15)
+        Some(PbList(xs)) =>
+            test.assert_eq(xs.len(), 3)
+            test.assert_eq(xs[2] == PbNum(v: 2), true)
+        _                => test.fail("rep is repeated")
+    match pbdyn.get(m, 20)
+        Some(PbList(xs)) => test.assert_eq(xs.len(), 2)
+        _                => test.fail("names is repeated")
+    match pbdyn.get(m, 22)
+        Some(PbList(xs)) =>
+            test.assert_eq(pbdyn.value_kind(xs[1]), "enum")
+            match xs[1]
+                PbEnumOf(n, name) =>
+                    test.assert_eq(n, 1)
+                    test.assert_eq(name, "ONE")
+                _                 => test.fail("an enum")
+        _                => test.fail("cols is repeated")
+
+@test
+fn test_a_field_of_the_wrong_wire_type_is_kept_unknown()
+    // Field 7 is a string and arrives as a varint; field 99 is undeclared.
+    let m = decoded(p3(), hex("3801b8060a"))
+    test.assert_eq(pbdyn.has(m, 7), false)
+    test.assert_eq(pbunknown.count(m.unknown), 2)
+
+@test
+fn test_submessages_merge_and_groups_nest()
+    var b = pbwrite.builder(pbwrite.build_limits())
+    b = built(pbwrite.put_bytes(b, 14, hex("0801")))
+    b = built(pbwrite.put_bytes(b, 14, hex("12020802")))
+    let raw = done(b) + hex("8b01" + "0805" + "8c01")
+    let m = decoded(p3(), raw)
+    match pbdyn.get(m, 14)
+        Some(PbNested(leaf)) =>
+            test.assert_eq(pbdyn.get(leaf, 1) == Some(PbNum(v: 1)), true)
+            test.assert_eq(pbdyn.has(leaf, 2), true)
+        _                    => test.fail("leaf is a message")
+    match pbdyn.get(m, 17)
+        Some(PbNested(g)) => test.assert_eq(pbdyn.get(g, 1) == Some(PbNum(v: 5)), true)
+        _                 => test.fail("g is a group")
+    test.assert_eq(bytes.len(encoded(p3(), m)), 14)
+
+@test
+fn test_a_group_nobody_declared_is_kept_whole()
+    let m = decoded(p3(), hex("cb06" + "0801" + "cc06"))
+    test.assert_eq(pbunknown.count(m.unknown), 1)
+    test.assert_eq(bytes.to_hex(pbunknown.fields_of(m.unknown)[0].raw), "cb060801cc06")
+
+@test
+fn test_a_oneof_keeps_its_last_member_and_a_map_collects_entries()
+    var b = pbwrite.builder(pbwrite.build_limits())
+    b = built(pbwrite.put_string(b, 18, "first"))
+    b = built(pbwrite.put_bytes(b, 19, hex("0807")))
+    b = built(pbwrite.begin(b, 16))
+    b = built(pbwrite.put_string(b, 1, "k"))
+    b = built(pbwrite.end(b))
+    b = built(pbwrite.begin(b, 16))
+    b = built(pbwrite.put_bytes(b, 2, hex("0803")))
+    b = built(pbwrite.end(b))
+    b = built(pbwrite.begin(b, 25))
+    b = built(pbwrite.end(b))
+    let m = decoded(p3(), done(b))
+    test.assert_eq(pbdyn.has(m, 18), false)
+    test.assert_eq(pbdyn.which_oneof(p3(), m, "pick") == Some(19), true)
+    match pbdyn.get(m, 16)
+        Some(PbMap(es)) =>
+            test.assert_eq(es.len(), 2)
+            test.assert_eq(es[0].key == PbText(v: "k"), true)
+            test.assert_eq(pbdyn.value_kind(es[0].value), "nested")
+            test.assert_eq(es[1].key == PbText(v: ""), true)
+        _               => test.fail("dict is a map")
+    match pbdyn.get(m, 25)
+        Some(PbMap(es)) => test.assert_eq(es[0].value == PbNum(v: 0), true)
+        _               => test.fail("half is a map")
+
+@test
+fn test_a_zero_without_presence_is_not_set_and_clears_what_was()
+    let m = decoded(p3(), hex("0805" + "0800" + "2800" + "3a00" + "4d00000000"))
+    test.assert_eq(pbdyn.has(m, 1), false)
+    test.assert_eq(pbdyn.set_numbers(m).len(), 0)
+    // proto2 has presence, so the zeros are set.
+    let two = decoded(set_of(PbProto2), hex("0800" + "2800" + "3a00" + "4200" + "4d00000000" + "510000000000000000"))
+    test.assert_eq(pbdyn.set_numbers(two).len(), 6)
+
+@test
+fn test_every_default_a_map_entry_can_need()
+    let fields = [opt("key", 1, PbTypeString), opt("value", 2, PbTypeDouble)]
+    let kinds = [PbTypeDouble, PbTypeFloat, PbTypeBool, PbTypeString, PbTypeBytes, PbTypeEnum,
+        PbTypeMessage, PbTypeGroup, PbTypeSint64]
+    let want = ["real", "real", "flag", "text", "octets", "enum", "nested", "nested", "num"]
+    for i in 0..list.len(kinds)
+        let entry = msg(".q.M.VEntry", [opt("key", 1, PbTypeString),
+            fld("value", 2, PbLabelOptional, kinds[i], ".d.Col")], true)
+        let m = msg(".q.M", [fld("v", 1, PbLabelRepeated, PbTypeMessage, ".q.M.VEntry")], false)
+        let set = PbFileSet { files: [PbFile { name: "q.proto", package: "q", syntax: PbProto3,
+            dependency: [], public_dependency: [], messages: [m, entry], enums: [col()],
+            services: [], extensions: [], options: PbFileOptions { deprecated: false,
+                go_package: "", java_package: "", unknown: pbunknown.empty() } }] }
+        match pbdyn.decode(set, ".q.M", hex("0a00"), pbread.default_limits())
+            Ok(x)  =>
+                match pbdyn.get(x, 1)
+                    Some(PbMap(es)) => test.assert_eq(pbdyn.value_kind(es[0].value), want[i])
+                    _               => test.fail("v is a map")
+            Err(e) => test.fail(e.message())
+    test.assert_eq(fields.len(), 2)
+
+// ── decoding refusals ───────────────────────────────────────────────
+
+@test
+fn test_decode_refuses_with_offsets_in_the_outer_message()
+    let d = pbread.default_limits()
+    // Field 7 is a string holding 0xff.
+    test.assert_eq(decode_err(p3(), hex("3a01ff"), d) == PbNotUtf8(at: 2, byte: 255), true)
+    // The same inside the leaf's kid: offsets count from the outer
+    // message's first byte.
+    let nested = hex("7206" + "1204" + "0a02" + "c328")
+    match pbdyn.decode(p3(), ".d.All", nested, d)
+        Ok(_)  => test.assert_eq(1, 1)
+        Err(e) => test.fail(e.message())
+    let off = PbLimits { max_depth: 100, max_message: 100, check_utf8: false }
+    match pbdyn.decode(p3(), ".d.All", hex("3a01ff"), off)
+        Ok(m)  => test.assert_eq(pbdyn.has(m, 7), true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_decode_refuses_an_unknown_type_a_large_message_and_deep_nesting()
+    match pbdyn.decode(p3(), ".d.Nope", hex(""), pbread.default_limits())
+        Ok(_)  => test.fail("no such type")
+        Err(e) => test.assert_eq(e == PbNoSuchType(at: 0, name: ".d.Nope"), true)
+    let small = PbLimits { max_depth: 100, max_message: 1, check_utf8: true }
+    test.assert_eq(decode_err(p3(), hex("0801"), small) == PbMessageTooLarge(at: 0, len: 2, limit: 1), true)
+    let shallow = PbLimits { max_depth: 1, max_message: 100, check_utf8: true }
+    test.assert_eq(decode_err(p3(), hex("7204" + "1202" + "0801"), shallow) == PbDepthExceeded(at: 4, limit: 1), true)
+    // A field whose message type the set does not declare.
+    test.assert_eq(decode_err(p3(), hex("ba0100"), pbread.default_limits()) == PbNoSuchType(at: 3, name: ".d.Lost"), true)
+    test.assert_eq(decode_err(p3(), hex("c301c401"), pbread.default_limits()) == PbNoSuchType(at: 0, name: ".d.Lost"), true)
+    test.assert_eq(decode_err(p3(), hex("7a01"), pbread.default_limits()) == PbLengthOverrun(at: 1, len: 1, left: 0), true)
+
+// ── encoding refusals ───────────────────────────────────────────────
+
+fn with(n: Int, v: PbValue) -> PbDynamic
+    pbdyn.set(pbdyn.message(".d.All"), n, v)
+
+fn kind_refusal(n: Int, v: PbValue) -> Str
+    match encode_err(p3(), with(n, v))
+        PbSchemaRefused(PbKindMismatch(_, want, _)) => want
+        e                                           => e.message()
+
+@test
+fn test_every_kind_mismatch_names_the_kind_its_field_takes()
+    test.assert_eq(kind_refusal(1, PbText(v: "x")), "num")
+    test.assert_eq(kind_refusal(1, PbNested(m: pbdyn.message(".d.Leaf"))), "num")
+    test.assert_eq(kind_refusal(5, PbNum(v: 1)), "flag")
+    test.assert_eq(kind_refusal(6, PbText(v: "x")), "enum")
+    test.assert_eq(kind_refusal(7, PbNum(v: 1)), "text")
+    test.assert_eq(kind_refusal(8, PbNum(v: 1)), "octets")
+    test.assert_eq(kind_refusal(9, PbNum(v: 1)), "real")
+    test.assert_eq(kind_refusal(10, PbFlag(v: true)), "real")
+    test.assert_eq(kind_refusal(14, PbNum(v: 1)), "nested")
+    test.assert_eq(kind_refusal(14, PbNested(m: pbdyn.message(".d.All"))), ".d.Leaf")
+    test.assert_eq(kind_refusal(17, PbNested(m: pbdyn.message(".d.All"))), ".d.Leaf")
+    test.assert_eq(kind_refusal(15, PbNum(v: 1)), "list")
+    test.assert_eq(kind_refusal(16, PbList(items: [])), "map")
+    test.assert_eq(kind_refusal(15, PbList(items: [PbText(v: "x")])), "num")
+    test.assert_eq(kind_refusal(21, PbList(items: [PbNum(v: 1)])), "real")
+
+@test
+fn test_encode_refuses_an_undeclared_field_and_type()
+    match encode_err(p3(), with(99, PbNum(v: 1)))
+        PbSchemaRefused(e) => test.assert_eq(e == PbUndeclaredField(path: "d.All", field: 99), true)
+        e                  => test.fail(e.message())
+    match encode_err(p3(), pbdyn.set(pbdyn.message("Loose"), 1, PbNum(v: 1)))
+        PbSchemaRefused(e) => test.assert_eq(e == PbUnresolvedTypeName(path: "", name: "Loose"), true)
+        e                  => test.fail(e.message())
+    let map_of_lost = fld("m", 1, PbLabelRepeated, PbTypeMessage, ".d.Leaf")
+    test.assert_eq(map_of_lost.number, 1)
+
+@test
+fn test_encode_refuses_a_value_outside_its_range()
+    test.assert_eq(encode_err(p3(), with(2, PbNum(v: 0 - 1))) == PbValueOutOfRange(field: 2, value: 0 - 1), true)
+    test.assert_eq(encode_err(p3(), with(1, PbNum(v: 1 << 40))) == PbValueOutOfRange(field: 1, value: 1 << 40), true)
+    test.assert_eq(encode_err(p3(), with(3, PbNum(v: 1 << 40))) == PbValueOutOfRange(field: 3, value: 1 << 40), true)
+
+@test
+fn test_encode_refuses_nesting_past_the_builder_s_depth()
+    var m = pbdyn.message(".d.Leaf")
+    for i in 0..101
+        m = pbdyn.set(pbdyn.message(".d.Leaf"), 2, PbNested(m: m))
+    match pbdyn.encode(p3(), m)
+        Ok(_)  => test.fail("102 levels")
+        Err(e) => test.assert_eq(e == PbEncodeDepthExceeded(limit: 100), true)
+
+@test
+fn test_encode_writes_every_integer_type_and_skips_zeros()
+    var m = pbdyn.message(".d.All")
+    m = pbdyn.set(m, 1, PbNum(v: 0))
+    m = pbdyn.set(m, 3, PbNum(v: 0 - 1))
+    m = pbdyn.set(m, 4, PbNum(v: 0 - 1))
+    m = pbdyn.set(m, 6, PbNum(v: 1))
+    m = pbdyn.set(m, 11, PbNum(v: 1))
+    m = pbdyn.set(m, 12, PbNum(v: 0 - 1))
+    m = pbdyn.set(m, 13, PbNum(v: 1))
+    m = pbdyn.set(m, 27, PbNum(v: 0 - 1))
+    m = pbdyn.set(m, 22, PbList(items: [PbNum(v: 1), PbEnumOf(number: 0, name: "Z")]))
+    m = pbdyn.set(m, 28, PbList(items: [PbFlag(v: true)]))
+    m = pbdyn.set(m, 21, PbList(items: [PbReal(v: 1.0)]))
+    m = pbdyn.set(m, 20, PbList(items: [PbText(v: "a")]))
+    test.assert_eq(bytes.to_hex(encoded(p3(), m)),
+        "1801" + "2001" + "3001" + "5d01000000" + "65ffffffff" + "690100000000000000"
+        + "d901ffffffffffffffff" + "b2010201" + "00" + "e2010101" + "aa01040000803f" + "a2010161")
+
+@test
+fn test_encode_into_refuses_a_buffer_too_small()
+    var c = bytes.cursor_le(bytes.zeros(1))
+    match pbdyn.encode_into(p3(), with(1, PbNum(v: 150)), c)
+        Ok(_)  => test.fail("three bytes in one")
+        Err(e) => test.assert_eq(e == PbBufferTooSmall(need: 3, left: 1), true)
+    match pbdyn.encoded_len(p3(), with(99, PbNum(v: 1)))
+        Ok(_)  => test.fail("field 99 is not declared")
+        Err(e) => test.assert_eq(str.contains(e.message(), "99"), true)
+    match pbdyn.encode_into(p3(), with(99, PbNum(v: 1)), c)
+        Ok(_)  => test.fail("field 99 is not declared")
+        Err(e) => test.assert_eq(str.contains(e.message(), "99"), true)
+
+// ── type_check ──────────────────────────────────────────────────────
+
+@test
+fn test_type_check_reports_everything_at_once()
+    var m = pbdyn.message(".d.All")
+    m = pbdyn.set(m, 1, PbText(v: "x"))
+    m = pbdyn.set(m, 99, PbNum(v: 1))
+    m = pbdyn.set(m, 15, PbNum(v: 1))
+    m = pbdyn.set(m, 16, PbNum(v: 1))
+    m = pbdyn.set(m, 20, PbList(items: [PbNum(v: 1)]))
+    m = pbdyn.set(m, 14, PbNested(m: pbdyn.message(".d.All")))
+    let bad_leaf = pbdyn.set(pbdyn.message(".d.Leaf"), 1, PbText(v: "no"))
+    m = pbdyn.set(m, 17, PbNested(m: bad_leaf))
+    m = pbdyn.set(m, 6, PbNum(v: 1))
+    let entry = PbMapEntry { key: PbNum(v: 1), value: PbNested(m: pbdyn.message(".d.Leaf")) }
+    m = pbdyn.set(m, 25, PbMap(entries: [PbMapEntry { key: PbNum(v: 1), value: PbNum(v: 0) }]))
+    m = pbdyn.set(m, 26, PbMap(entries: [entry]))
+    let errs = pbdyn.type_check(p3(), m)
+    test.assert_eq(errs.len(), 8)
+    test.assert_eq(errs[0] == PbKindMismatch(path: "d.All.i32", want: "num", got: "text"), true)
+    test.assert_eq(errs[1] == PbUndeclaredField(path: "d.All", field: 99), true)
+    test.assert_eq(errs[2] == PbKindMismatch(path: "d.All.rep", want: "list", got: "num"), true)
+    test.assert_eq(errs[3] == PbKindMismatch(path: "d.All.dict", want: "map", got: "num"), true)
+    test.assert_eq(errs[4] == PbKindMismatch(path: "d.All.names", want: "text", got: "num"), true)
+    test.assert_eq(errs[5] == PbKindMismatch(path: "d.All.leaf", want: ".d.Leaf", got: ".d.All"), true)
+    test.assert_eq(errs[6] == PbKindMismatch(path: "d.Leaf.a", want: "num", got: "text"), true)
+    test.assert_eq(pberr.schema_path(errs[7]), "d.All.u64")
+    match pbdyn.type_check(p3(), pbdyn.message(".d.None"))[0]
+        PbUnresolvedTypeName(_, name) => test.assert_eq(name, ".d.None")
+        _                             => test.fail("no such type")
+
+// ── reflection ──────────────────────────────────────────────────────
+
+@test
+fn test_lookups_that_find_nothing()
+    let m = with(1, PbNum(v: 1))
+    test.assert_eq(pbdyn.get_by_name(p3(), m, "nope") == None, true)
+    test.assert_eq(pbdyn.get_by_name(p3(), pbdyn.message(".d.None"), "i32") == None, true)
+    test.assert_eq(pbdyn.which_oneof(p3(), pbdyn.message(".d.None"), "pick") == None, true)
+    test.assert_eq(pbdyn.which_oneof(p3(), m, "nope") == None, true)
+    test.assert_eq(pbdyn.which_oneof(p3(), with(99, PbNum(v: 1)), "pick") == None, true)
+
+@test
+fn test_merge_concatenates_lists_and_maps_and_merges_submessages()
+    let e = PbMapEntry { key: PbText(v: "k"), value: PbNum(v: 1) }
+    let a = pbdyn.set(pbdyn.set(pbdyn.set(with(15, PbList(items: [PbNum(v: 1)])), 16,
+        PbMap(entries: [e])), 14, PbNested(m: pbdyn.set(pbdyn.message(".d.Leaf"), 1, PbNum(v: 1)))), 1, PbNum(v: 1))
+    let b = pbdyn.set(pbdyn.set(pbdyn.set(with(15, PbList(items: [PbNum(v: 2)])), 16,
+        PbMap(entries: [e])), 14, PbNested(m: pbdyn.set(pbdyn.message(".d.Leaf"), 2, PbNested(m: pbdyn.message(".d.Leaf"))))), 1, PbNum(v: 2))
+    let m = pbdyn.merge(a, b)
+    match pbdyn.get(m, 15)
+        Some(PbList(xs)) => test.assert_eq(xs.len(), 2)
+        _                => test.fail("rep")
+    match pbdyn.get(m, 16)
+        Some(PbMap(es)) => test.assert_eq(es.len(), 2)
+        _               => test.fail("dict")
+    match pbdyn.get(m, 14)
+        Some(PbNested(leaf)) => test.assert_eq(pbdyn.set_numbers(leaf).len(), 2)
+        _                    => test.fail("leaf")
+    test.assert_eq(pbdyn.get(m, 1) == Some(PbNum(v: 2)), true)
+
+@test
+fn test_every_kind_has_its_word()
+    let all = [PbNum(v: 1), PbReal(v: 1.0), PbFlag(v: true), PbText(v: ""),
+        PbOctets(v: bytes.zeros(0)), PbEnumOf(number: 0, name: ""),
+        PbNested(m: pbdyn.message(".d.Leaf")), PbList(items: []), PbMap(entries: [])]
+    var words: [Str] = []
+    for v in all
+        list.push(words, pbdyn.value_kind(v))
+    test.assert_eq(str.join(words, " "), "num real flag text octets enum nested list map")
+
+@test
+fn test_unsigned_text_reads_every_edge()
+    test.assert_eq(pbdyn.uint64_of_text("") == None, true)
+    test.assert_eq(pbdyn.uint64_of_text("12a") == None, true)
+    test.assert_eq(pbdyn.uint64_of_text("-1") == None, true)
+    test.assert_eq(pbdyn.uint64_of_text("18446744073709551616") == None, true)
+    test.assert_eq(pbdyn.uint64_of_text("99999999999999999999") == None, true)
+    test.assert_eq(pbdyn.uint64_of_text("0") == Some(0), true)
+    test.assert_eq(pbdyn.uint64_of_text("9223372036854775808") == Some(0 - 9223372036854775807 - 1), true)
+    test.assert_eq(pbdyn.uint64_text(0 - 9223372036854775807 - 1), "9223372036854775808")
+    test.assert_eq(pbdyn.uint64_text(0 - 10), "18446744073709551606")
