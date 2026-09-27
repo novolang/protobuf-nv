@@ -853,14 +853,13 @@ fn dotless(full: Str) -> Str
     full
 
 fn check_type(var errs: [PbSchemaError], set: PbFileSet, f: PbField, at: Str)
-    match f.field_type
-        PbTypeMessage => if find_message(set, f.type_name) == None
-            list.push(errs, PbUnresolvedTypeName(path: at, name: f.type_name))
-        PbTypeGroup   => if find_message(set, f.type_name) == None
-            list.push(errs, PbUnresolvedTypeName(path: at, name: f.type_name))
-        PbTypeEnum    => if find_enum(set, f.type_name) == None
-            list.push(errs, PbUnresolvedTypeName(path: at, name: f.type_name))
-        _             => ()
+    let found = match f.field_type
+        PbTypeMessage => find_message(set, f.type_name) != None
+        PbTypeGroup   => find_message(set, f.type_name) != None
+        PbTypeEnum    => find_enum(set, f.type_name) != None
+        _             => true
+    if not found
+        list.push(errs, PbUnresolvedTypeName(path: at, name: f.type_name))
 
 fn check_message(set: PbFileSet, m: PbMessage, p3: Bool) -> [PbSchemaError]
     var errs: [PbSchemaError] = []

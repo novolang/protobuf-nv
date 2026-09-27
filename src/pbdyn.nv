@@ -607,8 +607,9 @@ pub fn which_oneof(set: PbFileSet, m: PbDynamic, oneof_name: Str) -> ?Int []
     var found: ?Int = None
     for f in m.fields
         match pbdesc.field_by_number(md, f.number)
-            Some(fd) => if fd.oneof_index == index and index >= 0
-                found = Some(f.number)
+            Some(fd) =>
+                if fd.oneof_index == index and index >= 0
+                    found = Some(f.number)
             None     => ()
     found
 

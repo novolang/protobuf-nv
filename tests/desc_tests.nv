@@ -1,0 +1,334 @@
+// tests/desc_tests.nv — descriptors built by hand: every named option
+// written and read back, the malformed shapes a reader steps over, and
+// every finding `validate` can report.
+
+use std.test
+use std.bytes
+use pbwire
+use pbread
+use pbunknown
+use pbdesc
+use pberr
+
+fn hex(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+fn fld(name: Str, number: Int, label: PbLabel, t: PbFieldType, type_name: Str) -> PbField
+    PbField { name: name, json_name: pbdesc.default_json_name(name), number: number, label: label,
+        field_type: t, type_name: type_name, extendee: "", oneof_index: 0 - 1, packed_set: false,
+        packed_value: false, proto3_optional: false, default_value: "", deprecated: false }
+
+fn with_oneof(f: PbField, index: Int, synthetic: Bool) -> PbField
+    PbField { name: f.name, json_name: f.json_name, number: f.number, label: f.label,
+        field_type: f.field_type, type_name: f.type_name, extendee: f.extendee, oneof_index: index,
+        packed_set: f.packed_set, packed_value: f.packed_value, proto3_optional: synthetic,
+        default_value: f.default_value, deprecated: f.deprecated }
+
+fn msg(full: Str, fields: [PbField]) -> PbMessage
+    let parts = str.split(full, ".")
+    PbMessage { name: parts[list.len(parts) - 1], full_name: full, fields: fields, oneofs: [],
+        nested: [], enums: [], extensions: [], extension_ranges: [], reserved_ranges: [],
+        reserved_names: [], map_entry: false, deprecated: false, unknown: pbunknown.empty() }
+
+fn file(name: Str, syntax: PbSyntax, messages: [PbMessage], enums: [PbEnum]) -> PbFile
+    PbFile { name: name, package: "t", syntax: syntax, dependency: [], public_dependency: [],
+        messages: messages, enums: enums, services: [], extensions: [],
+        options: PbFileOptions { deprecated: false, go_package: "", java_package: "",
+            unknown: pbunknown.empty() } }
+
+fn opt_field(n: Int) -> PbUnknownSet
+    // Field `n`, a varint 1: an option this package does not name.
+    var c = bytes.cursor_le(bytes.zeros(8))
+    let _ = pbwire.write_tag_into(pbwire.tag(n, PbWireVarint), c)
+    let _ = pbwire.write_varint_into(1, c)
+    let used = c.pos()
+    pbunknown.keep(pbunknown.empty(), pbwire.tag(n, PbWireVarint), bytes.slice(c.finish(), 0, used))
+
+// A file that sets every field and option the package names.
+fn rich() -> PbFile
+    let packed = PbField { name: "xs", json_name: "xsJson", number: 1, label: PbLabelRepeated,
+        field_type: PbTypeInt32, type_name: "", extendee: "", oneof_index: 0 - 1,
+        packed_set: true, packed_value: false, proto3_optional: false, default_value: "",
+        deprecated: true }
+    let dflt = PbField { name: "label", json_name: "label", number: 2, label: PbLabelRequired,
+        field_type: PbTypeString, type_name: "", extendee: "", oneof_index: 0 - 1,
+        packed_set: true, packed_value: true, proto3_optional: false, default_value: "none",
+        deprecated: false }
+    let member = with_oneof(fld("pick", 3, PbLabelOptional, PbTypeEnum, ".t.Colour"), 0, false)
+    let inner = msg(".t.Outer.Inner", [fld("depth", 1, PbLabelOptional, PbTypeSint64, "")])
+    let ext = PbField { name: "flavour", json_name: "flavour", number: 100, label: PbLabelOptional,
+        field_type: PbTypeInt32, type_name: "", extendee: ".t.Outer", oneof_index: 0 - 1,
+        packed_set: false, packed_value: false, proto3_optional: false, default_value: "",
+        deprecated: false }
+    let colour = PbEnum { name: "Colour", full_name: ".t.Colour",
+        values: [PbEnumValue { name: "RED", number: 0, deprecated: true },
+            PbEnumValue { name: "CRIMSON", number: 0, deprecated: false },
+            PbEnumValue { name: "BLUE", number: 0 - 2, deprecated: false }],
+        allow_alias: true, zero_value: "RED", deprecated: true, unknown: opt_field(900) }
+    let nested_enum = PbEnum { name: "Mood", full_name: ".t.Outer.Mood",
+        values: [PbEnumValue { name: "CALM", number: 0, deprecated: false }],
+        allow_alias: false, zero_value: "CALM", deprecated: false, unknown: pbunknown.empty() }
+    let outer = PbMessage { name: "Outer", full_name: ".t.Outer", fields: [packed, dflt, member],
+        oneofs: [PbOneof { name: "choice", synthetic: false }], nested: [inner],
+        enums: [nested_enum], extensions: [ext],
+        extension_ranges: [PbNumberRange { first: 100, last: 199 }],
+        reserved_ranges: [PbNumberRange { first: 5, last: 9 }], reserved_names: ["old"],
+        map_entry: false, deprecated: true, unknown: opt_field(901) }
+    var methods: [PbMethod] = []
+    for s in [PbUnary, PbServerStream, PbClientStream, PbBidiStream]
+        list.push(methods, PbMethod { name: "M${list.len(methods)}", input_type: ".t.Outer",
+            output_type: ".t.Outer", streaming: s, deprecated: list.len(methods) == 0,
+            unknown: opt_field(902) })
+    let svc = PbService { name: "Svc", full_name: ".t.Svc", methods: methods, deprecated: true,
+        unknown: opt_field(903) }
+    PbFile { name: "rich.proto", package: "t", syntax: PbProto2,
+        dependency: ["a.proto", "b.proto"], public_dependency: [1],
+        messages: [outer], enums: [colour], services: [svc], extensions: [ext],
+        options: PbFileOptions { deprecated: true, go_package: "example.com/t",
+            java_package: "com.example.t", unknown: opt_field(904) } }
+
+fn written(set: PbFileSet) -> Bytes
+    match pbdesc.write_file_set(set)
+        Ok(b)  => b
+        Err(e) =>
+            test.fail(e.message())
+            bytes.zeros(0)
+
+fn parsed(b: Bytes) -> PbFileSet
+    match pbdesc.parse_file_set(b, pbread.default_limits())
+        Ok(s)  => s
+        Err(e) =>
+            test.fail(e.message())
+            PbFileSet { files: [] }
+
+@test
+fn test_every_named_option_survives_a_round_trip()
+    let raw = written(PbFileSet { files: [rich()] })
+    let back = parsed(raw)
+    test.assert_eq(bytes.to_hex(written(back)), bytes.to_hex(raw))
+    let f = back.files[0]
+    test.assert_eq(f.options.go_package, "example.com/t")
+    test.assert_eq(f.options.java_package, "com.example.t")
+    test.assert_eq(f.options.deprecated, true)
+    test.assert_eq(pbunknown.has_number(f.options.unknown, 904), true)
+    test.assert_eq(f.public_dependency[0], 1)
+    test.assert_eq(f.extensions[0].extendee, ".t.Outer")
+    let svc = f.services[0]
+    test.assert_eq(svc.deprecated, true)
+    test.assert_eq(svc.methods[3].streaming == PbBidiStream, true)
+    test.assert_eq(svc.methods[2].streaming == PbClientStream, true)
+    test.assert_eq(svc.methods[0].deprecated, true)
+    let colour = f.enums[0]
+    test.assert_eq(colour.allow_alias, true)
+    test.assert_eq(colour.deprecated, true)
+    test.assert_eq(colour.values[0].deprecated, true)
+    test.assert_eq(colour.values[2].number, 0 - 2)
+
+@test
+fn test_every_named_field_option_survives_a_round_trip()
+    let back = parsed(written(PbFileSet { files: [rich()] }))
+    let outer = back.files[0].messages[0]
+    let xs = outer.fields[0]
+    test.assert_eq(xs.json_name, "xsJson")
+    test.assert_eq(xs.packed_set, true)
+    test.assert_eq(xs.packed_value, false)
+    test.assert_eq(xs.deprecated, true)
+    test.assert_eq(outer.fields[1].default_value, "none")
+    test.assert_eq(outer.fields[1].label == PbLabelRequired, true)
+    test.assert_eq(outer.deprecated, true)
+    test.assert_eq(outer.nested[0].full_name, ".t.Outer.Inner")
+    test.assert_eq(outer.enums[0].full_name, ".t.Outer.Mood")
+    test.assert_eq(outer.extension_ranges[0].last, 199)
+    test.assert_eq(outer.reserved_ranges[0].last, 9)
+
+@test
+fn test_an_edition_is_carried_by_name_and_reported()
+    let f = file("e.proto", PbSyntaxOther(name: "editions"), [], [])
+    let back = parsed(written(PbFileSet { files: [f] }))
+    test.assert_eq(pbdesc.syntax_name(back.files[0].syntax), "editions")
+    let errs = pbdesc.validate(back)
+    test.assert_eq(errs.len(), 1)
+    test.assert_eq(errs[0] == PbUnknownSyntax(path: "e.proto", syntax: "editions"), true)
+
+// ── the shapes a reader steps over ──────────────────────────────────
+
+@test
+fn test_fields_of_the_wrong_wire_type_read_as_empty()
+    // A file whose name (1) is a varint, holding a message (4) whose
+    // name is a varint, with a field (2) written once as a varint and
+    // once as a field whose number (3) is a string and whose
+    // `deprecated` option (8, then 3) is a string too.
+    let fdp = hex("0801" + "220d" + "0801" + "1001" + "1207" + "1a0178" + "42021a00")
+    match pbdesc.parse_file(fdp, pbread.default_limits())
+        Ok(f)  =>
+            test.assert_eq(f.name, "")
+            let m = f.messages[0]
+            test.assert_eq(f.messages.len(), 1)
+            test.assert_eq(m.fields.len(), 1)
+            test.assert_eq(m.fields[0].number, 0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_option_that_is_a_group_is_kept_whole()
+    // FileOptions (8) holding group 50 around field 1 = 1, and field 23
+    // (deprecated) written as a string.
+    let fdp = hex("0a01" + "61" + "4209" + "9303" + "0801" + "9403" + "ba0100")
+    match pbdesc.parse_file(fdp, pbread.default_limits())
+        Ok(f)  =>
+            test.assert_eq(f.name, "a")
+            test.assert_eq(pbunknown.count(f.options.unknown), 2)
+            test.assert_eq(f.options.deprecated, false)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_field_with_no_type_reads_as_a_message_or_an_int32()
+    // FieldDescriptorProto { name: "a", number: 1, type_name: ".t.M" }
+    // and { name: "b", number: 2 }, inside message "M".
+    let fdp = hex("2217" + "0a014d" + "120b0a01611801" + "32042e742e4d" + "12050a01621802")
+    match pbdesc.parse_file(fdp, pbread.default_limits())
+        Ok(f)  =>
+            let m = f.messages[0]
+            test.assert_eq(m.fields[0].field_type == PbTypeMessage, true)
+            test.assert_eq(m.fields[1].field_type == PbTypeInt32, true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_packed_public_dependency_list_reads()
+    let fdp = hex("520201" + "02")
+    match pbdesc.parse_file(fdp, pbread.default_limits())
+        Ok(f)  => test.assert_eq(f.public_dependency.len(), 2)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_nesting_past_the_limit_is_refused()
+    let inner = msg(".t.A.B", [])
+    let outer = PbMessage { name: "A", full_name: ".t.A", fields: [], oneofs: [], nested: [inner],
+        enums: [], extensions: [], extension_ranges: [], reserved_ranges: [], reserved_names: [],
+        map_entry: false, deprecated: false, unknown: pbunknown.empty() }
+    let raw = written(PbFileSet { files: [file("n.proto", PbProto3, [outer], [])] })
+    let shallow = PbLimits { max_depth: 1, max_message: 1000, check_utf8: true }
+    match pbdesc.parse_file_set(raw, shallow)
+        Ok(_)  => test.fail("B is nested one level too deep")
+        Err(e) => test.assert_eq(str.contains(e.message(), "exceeds the limit of 1"), true)
+
+// ── validate ────────────────────────────────────────────────────────
+
+fn findings(f: PbFile) -> [PbSchemaError]
+    pbdesc.validate(PbFileSet { files: [f] })
+
+@test
+fn test_every_unresolved_type_is_reported()
+    let m = msg(".t.M", [fld("a", 1, PbLabelOptional, PbTypeMessage, ".t.Nope"),
+        fld("b", 2, PbLabelOptional, PbTypeGroup, ".t.Gone"),
+        fld("c", 3, PbLabelOptional, PbTypeEnum, ".t.None")])
+    let errs = findings(file("u.proto", PbProto2, [m], []))
+    test.assert_eq(errs.len(), 3)
+    test.assert_eq(errs[0] == PbUnresolvedTypeName(path: "t.M.a", name: ".t.Nope"), true)
+    test.assert_eq(errs[2] == PbUnresolvedTypeName(path: "t.M.c", name: ".t.None"), true)
+
+@test
+fn test_duplicates_and_reserved_numbers_are_reported()
+    var m = msg(".t.M", [fld("a", 1, PbLabelOptional, PbTypeInt32, ""),
+        fld("a", 1, PbLabelOptional, PbTypeInt32, ""),
+        fld("b", 19000, PbLabelOptional, PbTypeInt32, ""),
+        fld("c", 6, PbLabelOptional, PbTypeInt32, ""),
+        fld("old", 7, PbLabelOptional, PbTypeInt32, ""),
+        with_oneof(fld("d", 8, PbLabelOptional, PbTypeInt32, ""), 4, false)])
+    let reserved = PbMessage { name: m.name, full_name: m.full_name, fields: m.fields, oneofs: [],
+        nested: [], enums: [], extensions: [], extension_ranges: [],
+        reserved_ranges: [PbNumberRange { first: 5, last: 6 }], reserved_names: ["old"],
+        map_entry: false, deprecated: false, unknown: pbunknown.empty() }
+    let errs = findings(file("d.proto", PbProto2, [reserved], []))
+    test.assert_eq(errs.len(), 6)
+    test.assert_eq(errs[0] == PbDuplicateFieldNumber(path: "t.M", field: 1), true)
+    test.assert_eq(errs[1] == PbDuplicateName(path: "t.M", name: "a"), true)
+    test.assert_eq(errs[2] == PbReservedInSchema(path: "t.M.b", field: 19000), true)
+    test.assert_eq(errs[3] == PbReservedInSchema(path: "t.M.c", field: 6), true)
+    test.assert_eq(errs[4] == PbReservedInSchema(path: "t.M.old", field: 7), true)
+    test.assert_eq(errs[5] == PbOneofIndexOutOfRange(path: "t.M.d", index: 4), true)
+
+@test
+fn test_proto3_refuses_what_only_proto2_has()
+    let g = msg(".t.G", [])
+    var d = fld("d", 3, PbLabelOptional, PbTypeInt32, "")
+    let dflt = PbField { name: "d", json_name: "d", number: 3, label: PbLabelOptional,
+        field_type: PbTypeInt32, type_name: "", extendee: "", oneof_index: 0 - 1,
+        packed_set: false, packed_value: false, proto3_optional: false, default_value: "7",
+        deprecated: false }
+    let m = msg(".t.M", [fld("g", 1, PbLabelOptional, PbTypeGroup, ".t.G"),
+        fld("r", 2, PbLabelRequired, PbTypeInt32, ""), dflt])
+    let e = PbEnum { name: "E", full_name: ".t.E", values: [PbEnumValue { name: "ONE", number: 1,
+        deprecated: false }], allow_alias: false, zero_value: "", deprecated: false,
+        unknown: pbunknown.empty() }
+    let errs = findings(file("p.proto", PbProto3, [m, g], [e]))
+    test.assert_eq(errs.len(), 4)
+    test.assert_eq(errs[0] == PbNotInProto3(path: "t.M.g", what: "a group"), true)
+    test.assert_eq(errs[1] == PbNotInProto3(path: "t.M.r", what: "a required field"), true)
+    test.assert_eq(errs[2] == PbNotInProto3(path: "t.M.d", what: "a default value"), true)
+    test.assert_eq(errs[3] == PbNotInProto3(path: "t.E", what: "a first enum value other than 0"), true)
+    test.assert_eq(d.number, 3)
+
+@test
+fn test_a_map_entry_must_be_one()
+    let bad_shape = PbMessage { name: "E", full_name: ".t.E", fields: [fld("key", 1, PbLabelOptional,
+        PbTypeString, "")], oneofs: [], nested: [], enums: [], extensions: [],
+        extension_ranges: [], reserved_ranges: [], reserved_names: [], map_entry: true,
+        deprecated: false, unknown: pbunknown.empty() }
+    let bad_key = PbMessage { name: "F", full_name: ".t.F", fields: [
+        fld("key", 1, PbLabelOptional, PbTypeDouble, ""), fld("value", 2, PbLabelOptional, PbTypeInt32, "")],
+        oneofs: [], nested: [], enums: [], extensions: [], extension_ranges: [],
+        reserved_ranges: [], reserved_names: [], map_entry: true, deprecated: false,
+        unknown: pbunknown.empty() }
+    let errs = findings(file("m.proto", PbProto3, [bad_shape, bad_key], []))
+    test.assert_eq(errs.len(), 2)
+    test.assert_eq(errs[0] == PbBadMapEntry(path: "t.E"), true)
+    test.assert_eq(errs[1] == PbBadMapKeyType(path: "t.F.key", type_name: "double"), true)
+
+@test
+fn test_an_enum_s_names_and_numbers_are_checked()
+    let e = PbEnum { name: "E", full_name: ".t.E", values: [
+        PbEnumValue { name: "A", number: 0, deprecated: false },
+        PbEnumValue { name: "A", number: 1, deprecated: false },
+        PbEnumValue { name: "B", number: 1, deprecated: false }],
+        allow_alias: false, zero_value: "A", deprecated: false, unknown: pbunknown.empty() }
+    let errs = findings(file("e.proto", PbProto3, [], [e]))
+    test.assert_eq(errs.len(), 2)
+    test.assert_eq(errs[0] == PbDuplicateName(path: "t.E", name: "A"), true)
+    test.assert_eq(errs[1] == PbDuplicateFieldNumber(path: "t.E", field: 1), true)
+
+@test
+fn test_an_extension_of_nothing_is_reported()
+    let x = PbField { name: "x", json_name: "x", number: 100, label: PbLabelOptional,
+        field_type: PbTypeInt32, type_name: "", extendee: ".t.Missing", oneof_index: 0 - 1,
+        packed_set: false, packed_value: false, proto3_optional: false, default_value: "",
+        deprecated: false }
+    let f = PbFile { name: "x.proto", package: "", syntax: PbProto2, dependency: [],
+        public_dependency: [], messages: [], enums: [], services: [], extensions: [x],
+        options: PbFileOptions { deprecated: false, go_package: "", java_package: "",
+            unknown: pbunknown.empty() } }
+    let errs = findings(f)
+    test.assert_eq(errs.len(), 1)
+    test.assert_eq(errs[0] == PbUnresolvedTypeName(path: "x", name: ".t.Missing"), true)
+
+// ── lookups that find nothing ───────────────────────────────────────
+
+@test
+fn test_every_lookup_answers_none_for_a_name_it_does_not_hold()
+    let set = PbFileSet { files: [rich()] }
+    test.assert_eq(pbdesc.find_message(set, ".t.Nope") == None, true)
+    test.assert_eq(pbdesc.find_enum(set, ".t.Outer.Mood") != None, true)
+    test.assert_eq(pbdesc.find_service(set, ".t.Nope") == None, true)
+    let r = rich()
+    let svc = r.services[0]
+    test.assert_eq(pbdesc.find_method(svc, "Nope") == None, true)
+    let outer = r.messages[0]
+    test.assert_eq(pbdesc.field_by_number(outer, 99) == None, true)
+    test.assert_eq(pbdesc.field_by_name(outer, "nope") == None, true)
+    test.assert_eq(pbdesc.field_by_json_name(outer, "xsJson") != None, true)
+    test.assert_eq(pbdesc.field_by_json_name(outer, "xs") == None, true)
+    let lost = fld("m", 1, PbLabelRepeated, PbTypeMessage, ".t.Lost")
+    test.assert_eq(pbdesc.is_map_field(set, lost), false)
+    test.assert_eq(pbdesc.map_key_field(set, lost) == None, true)
+    test.assert_eq(pbdesc.is_well_known("google.protobuf.Any"), false)
+    test.assert_eq(pbdesc.is_well_known(".google.protobuf.FileDescriptorProto"), false)
+    test.assert_eq(pbdesc.has_extensions(file("n.proto", PbProto3, [], [])), false)
