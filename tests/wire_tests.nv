@@ -275,8 +275,10 @@ fn test_utf8_is_rfc_3629_s()
         test.assert_eq(pbwire.first_non_utf8(b, 0, bytes.len(b)), 0)
     let b = hex("61e2")
     test.assert_eq(pbwire.first_non_utf8(b, 0, 2), 1)
-    // Only the range counts.
+    // Only the range counts, so a sequence the range cuts short is
+    // refused even when the buffer holds the rest of it.
     test.assert_eq(pbwire.first_non_utf8(hex("ff61"), 1, 1), 0 - 1)
+    test.assert_eq(pbwire.first_non_utf8(hex("e282ac"), 0, 2), 0)
 
 // ── sizes ───────────────────────────────────────────────────────────
 

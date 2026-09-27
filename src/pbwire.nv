@@ -697,7 +697,7 @@ fn utf8_len_at(data: Bytes, i: Int, end: Int) -> Int
             hi = 143
     else
         return 0
-    if i + need >= end + 1
+    if i + need >= end
         return 0
     let c1 = byte(data, i + 1)
     if c1 < lo or c1 > hi
