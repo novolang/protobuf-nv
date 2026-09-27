@@ -4,6 +4,81 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.1.0 — 2026-09-27
+
+The first implementation of the interface published as 0.0.1: the
+wire format, the reader and the writers, descriptor sets, the dynamic
+message and the code generator.
+
+### Behaviour the interface left open
+
+- A key's wire type is checked on its first byte, so `0xff` alone is
+  `PbUnknownWireType` rather than a truncated varint.
+- `PbVarintOverflow.bytes` is the length of the run of continuation
+  bytes, including the byte that ends it.
+- The reader waits, under `feed`, for a length-delimited field that has
+  not finished, and refuses it as `PbLengthOverrun` at `finish` and in
+  `walk`.  A length that would pass the byte limit is
+  `PbMessageTooLarge` as soon as it arrives.
+- `pbwire.field_len` of a group counts the end key too.
+- `pbwrite.write_packed_field`, `put_fixed` and `put_packed` take the
+  IEEE 754 bit pattern for `float` and `double` elements.
+- The builder answers `PbBufferTooSmall` with its byte limit as `left`
+  when a level would pass it.
+- `pbdyn.set` does not clear a oneof's other members, having no
+  descriptor; `decode` keeps a oneof's last member.  A singular
+  submessage that arrives twice is merged, and a proto3 scalar without
+  presence that arrives as zero is not set.  `encoded_len` encodes to
+  count.
+- `pbdesc.parse_file_set` keeps the unnamed options of files,
+  messages, enums, services and methods, and `write_file_set` writes
+  them back in field-number order; a set read and written again is
+  `protoc`'s own bytes.
+
+### Changes to the interface
+
+- `PbDecodeError` gains `PbTransport(at, cause: IoError)`, for a
+  source that fails under `pbread.drain`.
+- `PbEncodeError` gains `PbSchemaRefused(error)`, which `pbdyn.encode`
+  answers for a value that does not fit its descriptor.
+- `PbSchemaError` gains `PbUndeclaredField`, `PbKindMismatch` and
+  `PbNotGenerated`.
+- `PbSyntax` gains `PbSyntaxOther(name)`, so a file declaring an
+  edition reads and is reported rather than misread as proto2.
+- `PbField` gains `extendee`, and `PbFile` and `PbMessage` gain
+  `extensions`, so an extension is read, written back and refused by
+  the generator.
+- `PbGenOptions` loses `serde_impls` and `carry_comments`.  Every
+  struct and enum already implements `Serialize` and `Deserialize`
+  (SPEC section 3.8.1), and a descriptor set carries comments only in
+  `source_code_info`, which this package does not read.
+- `PbGenerated.path` is flat, the module name and `.nv`, because a
+  novo-lang module is found by its file name.
+- An enum field generates as an `Int`, so a number the schema does not
+  name survives a round trip.
+- New: `pberr.shifted`; `pbwire.float32_bits`, `float_of_bits32`,
+  `first_non_utf8`, `delimited_at` and `PbSpan`; `pbread.bits_of` and
+  `data_of`; `pbdesc.file_of` and `has_extensions`; `pbgen`'s
+  `write_fn_name`, `new_fn_name`, `enum_number_fn_name`,
+  `enum_of_fn_name`, `novo_oneof_variant_name`, `method_path`,
+  `method_path_fn_name` and `descriptor_fn_name`; and the module
+  `pbcodec`, the calls generated code makes.
+
+### Dependencies and toolchain
+
+- leb128-nv `^0.1.7`, zigzag-nv `^0.1.5` and varint-nv `^0.1.6`, the
+  first releases of each that build with novo 0.11 and later.
+- The toolchain floor is 0.13.0.
+
+### Tests
+
+- 206 tests in nine suites, with 100% line coverage over `src/`
+  measured by `tests/coverage.sh`.
+- `oracle_tests.nv` holds descriptor sets from `protoc` and messages
+  from Google's protobuf module, written by `tools/vectors.py`.
+- `tools/roundtrip.py` builds generated code and checks it against
+  Google's protobuf module in both directions and against `novo fmt`.
+
 ## 0.0.3 — 2026-09-25
 
 The package builds with novo 0.11.  Every body is still `todo()`.
