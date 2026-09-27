@@ -1,66 +1,48 @@
-// pbread — one message, read field by field, with no schema and no
-// buffer the caller did not give.
+// pbread — one message, read field by field, with no schema.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
+// The host feeds chunks in and takes finished fields out.  A protobuf
+// message is read strictly left to right, with no index and nothing to
+// seek to, so a reader needs to hold only the field it is inside.
 //
-// THE SHAPE IS FEED AND DRAIN.  The host pumps chunks in and takes
-// finished fields out (`docs/publishing.md` § How a `core` package
-// takes bytes from its host).  That is right here because a protobuf
-// field is small and a message is read strictly left to right — there
-// is no index, no back-reference and nothing to seek to.
+// A message is not self-delimiting.  It has no header, no length and
+// no end marker, so something outside the format says where it stops:
+// gRPC's five-byte frame, a file's own length prefix, or the
+// length-delimited field a submessage travels in.  `feed` therefore
+// never announces the end of a message, and `finish` is how the host
+// says that the message ends.
 //
-// A MESSAGE IS NOT SELF-DELIMITING, which is the fact that shapes this
-// whole module.  There is no header, no length and no end marker: a
-// message ends where its bytes end, and something outside the format
-// has to say where that is.  gRPC says it with a five-byte frame,
-// a file says it with its own length prefix, a field says it with the
-// length-delimited wire type.  So this reader reads UNTIL THE HOST SAYS
-// STOP — `finish` is that statement — and `feed` never announces a
-// message boundary it cannot see.
+// The events carry the wire shape and the raw bytes, not typed values.
+// A length-delimited field may be a string, a byte string, a
+// submessage or a packed repeated field, and only a schema says which.
+// `pbdyn` puts a descriptor over the events; generated code does the
+// same with the schema compiled in.
 //
-// WHY THE EVENTS CARRY NO FIELD NAMES.  This module has no schema.  A
-// length-delimited field is a string, a byte string, a submessage or a
-// packed repeated field, and only a `.proto` file knows which; a varint
-// is any of eight declared types.  So the events carry the wire shape
-// and the raw bytes, and `pbdyn` is the module that puts a descriptor
-// over them.  A caller with a generated struct does the same thing with
-// generated code.
-//
-// WHAT IT REFUSES, AND WHAT IT KEEPS.  It refuses what is not protobuf
-// at all — wire codes 6 and 7, a zero field number, a varint past ten
-// bytes, a length past the end, nesting past the limit.  It keeps
-// everything else, including field numbers in the descriptor
-// language's reserved range: a peer's mistake is not a reason to drop a
-// connection, and `pbwrite` is where writing one is refused.
+// The reader refuses what is not protobuf: wire codes 6 and 7, a zero
+// field number, a varint past ten bytes, a length past the end, and
+// nesting past the limit.  It reads everything else, including field
+// numbers in the descriptor language's reserved range.
 
 use std.bytes
+use pbwire
 use pbunknown
 
-// What a reader will not do, whatever it is asked.
+// What a reader will not do, whatever the input asks.
 //
-// Both numbers are defences against the sender rather than against the
-// format: a length-delimited field is an allocation instruction from
-// whoever sent it, and protobuf's nesting is unbounded by
-// specification.  Every implementation bounds both; this one says where
-// the numbers are instead of hiding them.
+// Both bounds defend against the sender.  A length-delimited field is
+// an instruction to set aside memory, and the specification puts no
+// bound on nesting.
 pub struct PbLimits
-    // How deep groups and submessages may nest.  100 by default, which
-    // is what the C++ implementation has used since 2008.
+    // How deep groups and submessages may nest.
     max_depth: Int
-    // The most bytes one message may occupy.  A field that announces
-    // more is `PbMessageTooLarge` before anything is reserved for it.
+    // The most bytes one message may occupy.
     max_message: Int
-    // Whether a `string` field's bytes are checked for UTF-8 as they
-    // are read.  On by default: proto3 requires it, and a `Str` whose
-    // bytes are not UTF-8 has a length nobody agrees on.  A reader
-    // walking a message it has no schema for does not know which
-    // length-delimited fields are strings, so this applies where
-    // `pbdyn` has a descriptor and nowhere else.
+    // Whether a `string` field's bytes are checked for UTF-8.  Only a
+    // reader with a schema knows which fields are strings, so this
+    // applies in `pbdyn` and in generated code.
     check_utf8: Bool
 
-// The limits a server should start from: depth 100, a 64 MiB message,
-// UTF-8 checked.
+// The limits a server starts from: depth 100, a 64 MiB message, UTF-8
+// checked.  The depth is the one the C++ implementation uses.
 //
 // ```novo
 // use pbread
@@ -69,70 +51,59 @@ pub struct PbLimits
 //     println("${pbread.default_limits().max_depth}")   // 100
 // ```
 pub fn default_limits() -> PbLimits []
-    todo("pbread.default_limits")
+    PbLimits { max_depth: 100, max_message: 64 * 1024 * 1024, check_utf8: true }
 
-// The limits for a program reading messages from somewhere it does not
-// trust: depth 32, a 1 MiB message, UTF-8 checked.
-//
-// Named rather than left to a caller to assemble, because the numbers
-// that matter are the ones somebody chose on purpose.
+// The limits for messages from a source that is not trusted: depth 32,
+// a 1 MiB message, UTF-8 checked.
 pub fn strict_limits() -> PbLimits []
-    todo("pbread.strict_limits")
+    PbLimits { max_depth: 32, max_message: 1024 * 1024, check_utf8: true }
 
-// One field's payload, in the shape its key announced and no other.
+// One field's payload, in the shape its key announced.
 //
-// This is deliberately NOT a typed value.  A varint is `int32`,
-// `int64`, `uint32`, `uint64`, `sint32`, `sint64`, `bool` or an enum
-// depending on a `.proto` file this module has not read, and answering
-// one of the eight would be a guess.  `pbdyn.value_of` is where a
-// descriptor turns one of these into a typed value.
+// A varint may be any of eight declared types, and only a schema says
+// which, so the payload is kept as the wire has it.
 pub enum PbRaw
-    // Wire type 0.  The varint's sixty-four-bit pattern, unfolded by
-    // nothing.
+    // Wire type 0: the varint's sixty-four-bit pattern.
     PbRawVarint(bits: Int)
-    // Wire type 1.  Eight little-endian bytes as a sixty-four-bit
+    // Wire type 1: eight little-endian bytes as a sixty-four-bit
     // pattern.
     PbRawFixed64(bits: Int)
-    // Wire type 2.  The payload, key and length prefix excluded.
+    // Wire type 2: the payload, without the key and the length prefix.
     PbRawBytes(data: Bytes)
-    // Wire type 5.  Four little-endian bytes as a thirty-two-bit
-    // pattern.
+    // Wire type 5: four little-endian bytes as a value in
+    // `0 ..= 2^32 - 1`.
     PbRawFixed32(bits: Int)
 
-// What the reader drained.
+// What a reader produced.
 //
-// `PbGroupStart` and `PbGroupEnd` bracket a proto2 group's fields, so a
-// caller sees the nesting rather than a flat run with a field number it
-// has to match up itself.  A submessage produces ONE `PbFieldSeen` with
-// a `PbRawBytes` payload — nesting it would mean knowing it is a
-// submessage, and only a schema knows that.
+// `PbGroupStart` and `PbGroupEnd` bracket a proto2 group's fields.  A
+// submessage is one `PbFieldSeen` with a `PbRawBytes` payload, because
+// only a schema says that a length-delimited field is a submessage.
 pub enum PbEvent
-    // A field arrived whole.  `raw_len` is what the field occupied
-    // including its key, which is what `pbunknown.keep` needs and what
-    // a caller computing an offset into the original buffer adds.
+    // A whole field.  `at` is the offset of its key and `raw_len` the
+    // bytes it occupies, key included.
     PbFieldSeen(tag: PbTag, value: PbRaw, at: Int, raw_len: Int)
-    // A group opened: wire type 3, with this field number.
+    // A group opened with this field number.  `at` is the offset of
+    // the key.
     PbGroupStart(field: Int, at: Int)
-    // A group closed: wire type 4, with the same number.
+    // A group closed with this field number.
     PbGroupEnd(field: Int, at: Int)
 
-// One turn of the reader: the reader after the step, what it produced,
-// and what it is waiting for.
+// One turn of the reader: the reader after the step, the events it
+// produced, and a hint of how many more bytes it wants.
 //
-// `need` is a HINT and never a promise — a varint has no announced
-// length, so the answer is 1 whenever the reader is inside one.  It is
-// 0 when the reader is between fields and would be content to stop.
+// `need` is 0 when the reader is between fields.  Inside a varint it is
+// 1, because a varint announces no length.
 pub struct PbStep
     reader: PbReader
     events: [PbEvent]
     need: Int
 
-// A message being read: the bytes not yet consumed, the group stack,
-// and how far in it is.
+// A message being read: the fed bytes not yet consumed, the open
+// groups, and the count of bytes consumed.
 //
-// Opaque on purpose.  Everything a caller needs is an accessor below,
-// and a field a caller reaches into is a field this package can never
-// change.
+// The fields are the reader's state.  The accessors below are the
+// interface a caller relies on.
 pub struct PbReader
     limits: PbLimits
     pending: Bytes
@@ -142,14 +113,135 @@ pub struct PbReader
 
 // A fresh reader over one message.
 pub fn reader(limits: PbLimits) -> PbReader []
-    todo("pbread.reader")
+    PbReader { limits: limits, pending: bytes.zeros(0), offset: 0, depth: 0, groups: [] }
+
+// What one scan at a position found: an event and its length, or a
+// field that has not finished arriving and how much more it needs.
+enum PbScan
+    PbScanEvent(ev: PbEvent, len: Int)
+    PbScanNeed(need: Int)
+
+// Scan the item at `pos` in `buf`, whose first byte is byte `base` of
+// the message.
+//
+// With `final` false, input that ends inside an item answers
+// `PbScanNeed`.  With `final` true the end of `buf` is the end of the
+// message, and it answers the refusal.
+fn scan(buf: Bytes, pos: Int, base: Int, final: Bool, limits: PbLimits,
+        groups: [Int]) -> Result<PbScan, PbDecodeError>
+    let at = base + pos
+    let k = match pbwire.read_tag_at(buf, pos)
+        Ok(k)  => k
+        Err(e) => return need_or(e, final, base)
+    let body = pos + k.len
+    let t = k.tag
+    match t.wire
+        PbWireVarint     =>
+            match pbwire.read_varint_at(buf, body)
+                Ok(v)  => field(t, PbRawVarint(bits: v.value), at, k.len + v.len)
+                Err(e) => need_or(e, final, base)
+        PbWireFixed64    => fixed(buf, t, body, at, k.len, 8, final, base)
+        PbWireFixed32    => fixed(buf, t, body, at, k.len, 4, final, base)
+        PbWireBytes      => delimited(buf, t, body, at, k.len, final, base, limits)
+        PbWireStartGroup =>
+            if list.len(groups) >= limits.max_depth
+                return Err(PbDepthExceeded(at: at, limit: limits.max_depth))
+            Ok(PbScanEvent(ev: PbGroupStart(field: t.field, at: at), len: k.len))
+        PbWireEndGroup   =>
+            let open = list.last(groups) ?? 0
+            if open != t.field
+                return Err(PbGroupMismatch(at: at, closed: t.field, open: open))
+            Ok(PbScanEvent(ev: PbGroupEnd(field: t.field, at: at), len: k.len))
+
+fn field(t: PbTag, v: PbRaw, at: Int, len: Int) -> Result<PbScan, PbDecodeError>
+    Ok(PbScanEvent(ev: PbFieldSeen(tag: t, value: v, at: at, raw_len: len), len: len))
+
+// A truncation becomes a wait unless the input is final; every other
+// refusal passes through with its offset moved into the message.
+fn need_or(e: PbDecodeError, final: Bool, base: Int) -> Result<PbScan, PbDecodeError>
+    match e
+        PbTruncated(at, need) =>
+            if final
+                return Err(PbTruncated(at: at + base, need: need))
+            Ok(PbScanNeed(need: need))
+        _ => Err(moved(e, base))
+
+// The same refusal with its offset moved by `base`.
+fn moved(e: PbDecodeError, base: Int) -> PbDecodeError
+    match e
+        PbVarintOverflow(at, n)         => PbVarintOverflow(at: at + base, bytes: n)
+        PbUnknownWireType(at, w)        => PbUnknownWireType(at: at + base, wire: w)
+        PbZeroFieldNumber(at)           => PbZeroFieldNumber(at: at + base)
+        PbFieldNumberTooLarge(at, f)    => PbFieldNumberTooLarge(at: at + base, field: f)
+        PbLengthNotRepresentable(at)    => PbLengthNotRepresentable(at: at + base)
+        PbTruncated(at, need)           => PbTruncated(at: at + base, need: need)
+        _                               => e
+
+fn fixed(buf: Bytes, t: PbTag, body: Int, at: Int, klen: Int, n: Int, final: Bool,
+         base: Int) -> Result<PbScan, PbDecodeError>
+    let have = bytes.len(buf) - body
+    if have < n
+        if final
+            return Err(PbTruncated(at: base + body, need: n - have))
+        return Ok(PbScanNeed(need: n - have))
+    if n == 8
+        let v = pbwire.read_fixed64_at(buf, body)!
+        return field(t, PbRawFixed64(bits: v.value), at, klen + 8)
+    let v = pbwire.read_fixed32_at(buf, body)!
+    field(t, PbRawFixed32(bits: v.value), at, klen + 4)
+
+fn delimited(buf: Bytes, t: PbTag, body: Int, at: Int, klen: Int, final: Bool, base: Int,
+             limits: PbLimits) -> Result<PbScan, PbDecodeError>
+    let p = match pbwire.read_varint_at(buf, body)
+        Ok(p)  => p
+        Err(e) => return need_or(e, final, base)
+    if p.value < 0
+        return Err(PbLengthNotRepresentable(at: base + body))
+    let start = body + p.len
+    let left = bytes.len(buf) - start
+    if final and p.value > left
+        return Err(PbLengthOverrun(at: base + body, len: p.value, left: left))
+    if base + start > limits.max_message - p.value
+        return Err(PbMessageTooLarge(at: at, len: base + start + p.value, limit: limits.max_message))
+    if p.value > left
+        return Ok(PbScanNeed(need: p.value - left))
+    let data = bytes.slice(buf, start, start + p.value)
+    field(t, PbRawBytes(data: data), at, klen + p.len + p.value)
+
+// The result of scanning a buffer as far as it goes.
+struct PbRun
+    var events: [PbEvent]
+    used: Int
+    var groups: [Int]
+    need: Int
+
+// Scan `buf` from its start, collecting events until the input runs
+// out or, with `final` false, stops inside a field.
+fn run(buf: Bytes, base: Int, final: Bool, limits: PbLimits,
+       groups: [Int]) -> Result<PbRun, PbDecodeError>
+    var events: [PbEvent] = []
+    var open = list.clone(groups)
+    var pos = 0
+    var need = 0
+    let n = bytes.len(buf)
+    while pos < n and need == 0
+        match scan(buf, pos, base, final, limits, open)!
+            PbScanNeed(k)       => need = k
+            PbScanEvent(ev, len) =>
+                match ev
+                    PbGroupStart(f, _) => list.push(open, f)
+                    PbGroupEnd(_, _)   => open = list.slice(open, 0, list.len(open) - 1)
+                    _                  => ()
+                list.push(events, ev)
+                pos = pos + len
+    Ok(PbRun { events: events, used: pos, groups: open, need: need })
 
 // Feed a chunk and take every field that finished.
 //
-// A field split across two chunks stays pending until the rest arrives;
-// nothing is copied twice and nothing is parsed twice.  A chunk that
-// finishes nothing is an empty event list and not an error — on a
-// socket that is the ordinary case.
+// A field split across two chunks stays pending until the rest
+// arrives.  A chunk that finishes nothing answers an empty event list,
+// which on a socket is the ordinary case.  `PbMessageTooLarge` as soon
+// as the bytes fed, or a length announced, pass the limit.
 //
 // ```novo
 // use std.bytes
@@ -163,44 +255,56 @@ pub fn reader(limits: PbLimits) -> PbReader []
 //         Err(e) => println(e.message())
 // ```
 pub fn feed(r: PbReader, chunk: [u8]) -> Result<PbStep, PbDecodeError> []
-    todo("pbread.feed")
+    let buf = bytes.concat([r.pending, bytes.from_byte_list(chunk)])
+    let total = r.offset + bytes.len(buf)
+    if total > r.limits.max_message
+        return Err(PbMessageTooLarge(at: r.offset, len: total, limit: r.limits.max_message))
+    let got = run(buf, r.offset, false, r.limits, r.groups)!
+    let rest = bytes.slice(buf, got.used, bytes.len(buf))
+    let next = PbReader { limits: r.limits, pending: rest, offset: r.offset + got.used,
+        depth: list.len(got.groups), groups: got.groups }
+    Ok(PbStep { reader: next, events: got.events, need: got.need })
 
 // Say that the message ends here.
 //
-// The host is the only party that knows where a message stops, so this
-// is how it says so.  Bytes still pending are `PbTruncated`; a group
-// still open is `PbUnclosedGroup`.  A message that ends cleanly answers
-// a step with `need` 0 and whatever the last chunk finished.
+// Bytes still pending are `PbTruncated`, or `PbLengthOverrun` inside a
+// length-delimited field.  A group still open is `PbUnclosedGroup`.  A
+// message that ends cleanly answers a step with no events and `need`
+// 0.
 pub fn finish(r: PbReader) -> Result<PbStep, PbDecodeError> []
-    todo("pbread.finish")
+    let got = run(r.pending, r.offset, true, r.limits, r.groups)!
+    let end = r.offset + got.used
+    match list.last(got.groups)
+        Some(f) => return Err(PbUnclosedGroup(at: end, field: f))
+        None    => ()
+    let next = PbReader { limits: r.limits, pending: bytes.zeros(0), offset: end,
+        depth: 0, groups: [] }
+    Ok(PbStep { reader: next, events: got.events, need: 0 })
 
-// How many bytes the reader has consumed since it was made.
-//
-// The number every `PbDecodeError`'s `at` is counted in, so a log line
-// from this end and one from the other end name the same byte.
+// How many bytes the reader has consumed since it was made.  Every
+// `PbDecodeError` offset counts in the same unit.
 pub fn offset(r: PbReader) -> Int []
-    todo("pbread.offset")
+    r.offset
 
-// How many fed bytes are still waiting for the rest of their field.
+// How many fed bytes are waiting for the rest of their field.
 pub fn pending_len(r: PbReader) -> Int []
-    todo("pbread.pending_len")
+    bytes.len(r.pending)
 
 // How many groups are open.
 pub fn depth(r: PbReader) -> Int []
-    todo("pbread.depth")
+    r.depth
 
-// Whether the reader is between fields, and so would accept `finish`
-// without refusing.
+// Whether the reader is between fields with no group open, and so
+// would accept `finish`.
 pub fn at_boundary(r: PbReader) -> Bool []
-    todo("pbread.at_boundary")
+    bytes.len(r.pending) == 0 and r.depth == 0
 
 // ── the whole-buffer forms ───────────────────────────────────────────
 
-// Every field of a message the caller already holds entirely.
+// Every field of a message the caller holds whole.
 //
-// The convenience over `feed` and `finish` for the common case: a
-// message that arrived inside a gRPC frame, a length-delimited field,
-// or a file.
+// `PbMessageTooLarge` before anything is read when `src` is longer
+// than the limit.
 //
 // ```novo
 // use std.bytes
@@ -209,38 +313,77 @@ pub fn at_boundary(r: PbReader) -> Bool []
 // fn main() [io]
 //     let buf = bytes.from_hex("089601") ?? bytes.zeros(0)
 //     match pbread.walk(buf, pbread.default_limits())
-//         Ok(evs) => println("${evs.len()}")   // 1 — field 1, varint 150
+//         Ok(evs) => println("${evs.len()}")   // 1: field 1, varint 150
 //         Err(e)  => println(e.message())
 // ```
 pub fn walk(src: Bytes, limits: PbLimits) -> Result<[PbEvent], PbDecodeError> []
-    todo("pbread.walk")
+    walk_from(src, 0, limits)
 
-// Every field of the `len` bytes at `off`.
+fn walk_from(src: Bytes, base: Int, limits: PbLimits) -> Result<[PbEvent], PbDecodeError>
+    let n = bytes.len(src)
+    if n > limits.max_message
+        return Err(PbMessageTooLarge(at: base, len: n, limit: limits.max_message))
+    let got = run(src, base, true, limits, [])!
+    match list.last(got.groups)
+        Some(f) => Err(PbUnclosedGroup(at: base + n, field: f))
+        None    => Ok(got.events)
+
+// Every field of the `len` bytes at `off` in `src`, with offsets
+// counted in `src`.
 //
-// What a caller re-entering a submessage calls: a `PbRawBytes` payload
-// is a nested message's bytes, and this reads them without copying them
-// out first.
+// What a caller re-entering a submessage calls.  `PbLengthOverrun`
+// when the range passes the end of `src`.
 pub fn walk_range(src: Bytes, off: Int, len: Int,
                   limits: PbLimits) -> Result<[PbEvent], PbDecodeError> []
-    todo("pbread.walk_range")
+    let left = bytes.len(src) - off
+    if off < 0 or len < 0 or len > left
+        return Err(PbLengthOverrun(at: off, len: len, left: left))
+    walk_from(bytes.slice(src, off, off + len), off, limits)
 
 // Every element of a packed repeated field, decoded as `t`.
 //
-// A packed field arrives as one `PbRawBytes`, and only the schema knows
-// that its bytes are a hundred `sint32`s rather than a string.  This is
-// the function `pbdyn` calls once it does.
+// A varint type answers `PbRawVarint`s, a four-byte type
+// `PbRawFixed32`s and an eight-byte type `PbRawFixed64`s.
+// `PbPackedRemainder` when the payload does not divide into whole
+// elements or `t` may not be packed.
 pub fn unpack(data: Bytes, t: PbFieldType) -> Result<[PbRaw], PbDecodeError> []
-    todo("pbread.unpack")
+    let n = bytes.len(data)
+    let _ = pbwire.packed_element_count(data, 0, n, t)!
+    var out: [PbRaw] = []
+    var i = 0
+    match pbwire.wire_for(t)
+        PbWireFixed64 =>
+            while i < n
+                list.push(out, PbRawFixed64(bits: pbwire.read_fixed64_at(data, i)!.value))
+                i = i + 8
+        PbWireFixed32 =>
+            while i < n
+                list.push(out, PbRawFixed32(bits: pbwire.read_fixed32_at(data, i)!.value))
+                i = i + 4
+        _             =>
+            while i < n
+                let v = pbwire.read_varint_at(data, i)!
+                list.push(out, PbRawVarint(bits: v.value))
+                i = i + v.len
+    Ok(out)
 
 // ── keeping what is not known ────────────────────────────────────────
 
-// Split a message's fields into the ones `wanted` names and the ones it
-// does not.
+// A message split into the fields a schema declared and the fields it
+// did not.
+pub struct PbPartition
+    // The events of the declared fields, groups bracketed, in arrival
+    // order.
+    known: [PbEvent]
+    // The other fields, kept whole.
+    unknown: PbUnknownSet
+
+// Split a message's top-level fields into the ones `wanted` names and
+// the ones it does not.
 //
-// The second half is what a program must write back out unchanged, and
-// this is the one call that makes doing so the default rather than an
-// act of diligence.  `wanted` is the field numbers this program's
-// schema declares.
+// The second half is what a program writes back out unchanged.  A
+// group whose number is not wanted is kept as one field, both keys
+// included.
 //
 // ```novo
 // use std.bytes
@@ -255,25 +398,67 @@ pub fn unpack(data: Bytes, t: PbFieldType) -> Result<[PbRaw], PbDecodeError> []
 // ```
 pub fn partition(src: Bytes, wanted: [Int],
                  limits: PbLimits) -> Result<PbPartition, PbDecodeError> []
-    todo("pbread.partition")
-
-// A message split into the fields a schema declared and the fields it
-// did not.
-pub struct PbPartition
-    known: [PbEvent]
-    unknown: PbUnknownSet
+    let evs = walk(src, limits)!
+    var known: [PbEvent] = []
+    var unknown = pbunknown.empty()
+    var depth = 0
+    var keep_group = false
+    var group_at = 0
+    for ev in evs
+        match ev
+            PbFieldSeen(t, _, at, raw_len) =>
+                if depth > 0
+                    if not keep_group
+                        list.push(known, ev)
+                else if list.contains(wanted, t.field)
+                    list.push(known, ev)
+                else
+                    unknown = pbunknown.keep(unknown, t, bytes.slice(src, at, at + raw_len))
+            PbGroupStart(f, at)            =>
+                if depth == 0
+                    keep_group = not list.contains(wanted, f)
+                    group_at = at
+                if not keep_group
+                    list.push(known, ev)
+                depth = depth + 1
+            PbGroupEnd(f, at)              =>
+                depth = depth - 1
+                if not keep_group
+                    list.push(known, ev)
+                else if depth == 0
+                    let end = at + pbwire.key_len(pbwire.tag(f, PbWireEndGroup))
+                    let t = pbwire.tag(f, PbWireStartGroup)
+                    unknown = pbunknown.keep(unknown, t, bytes.slice(src, group_at, end))
+    Ok(PbPartition { known: known, unknown: unknown })
 
 // ── the bound effect parameter ───────────────────────────────────────
 
-// Read one whole message from the caller's source.
+// Read one whole message of `limit` bytes from the caller's source.
 //
-// The pump written once inside the package, charged whatever the
-// caller's source costs: `[io]` for a socket, nothing for a buffer
-// (`docs/publishing.md` § How a `core` package takes bytes from its
-// host).  `limit` is how many bytes the message is — the host knows,
-// because a protobuf message is not self-delimiting.
+// The loop is written once here and charged whatever the caller's
+// source costs: `[io]` for a socket, nothing for a buffer (SPEC section
+// 5.6).  The host passes the length, because a protobuf message is not
+// self-delimiting.  A source that ends before `limit` bytes is
+// `PbTruncated`, and one that fails is `PbTransport`.
 //
-// It does not replace `feed` and `finish`: a caller that cannot give up
-// control of its own loop still needs the state machine.
+// A caller that must keep control of its own loop uses `feed` and
+// `finish` instead.
 pub fn drain<S: Read[e]>(r: PbReader, src: S, limit: Int) -> Result<PbStep, PbDecodeError> [e]
-    todo("pbread.drain")
+    var cur = r
+    var events: [PbEvent] = []
+    var got = 0
+    while got < limit
+        let want = if limit - got < 4096 then limit - got else 4096
+        let chunk = match src.read(want)
+            Ok(c)  => c
+            Err(e) => return Err(PbTransport(at: cur.offset + pending_len(cur), cause: e))
+        let n = bytes.len(chunk)
+        if n == 0
+            return Err(PbTruncated(at: cur.offset + pending_len(cur), need: limit - got))
+        let step = feed(cur, bytes.to_byte_list(chunk))!
+        list.append(events, step.events)
+        cur = step.reader
+        got = got + n
+    let last = finish(cur)!
+    list.append(events, last.events)
+    Ok(PbStep { reader: last.reader, events: events, need: 0 })

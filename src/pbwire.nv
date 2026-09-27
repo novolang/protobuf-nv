@@ -1,51 +1,38 @@
-// pbwire — the encoding itself: keys, wire types, the seven scalar
-// codings and the rule for skipping a field nobody declared.
+// pbwire — the encoding itself: keys, wire types, the scalar codings,
+// the length arithmetic, and the rule for skipping a field nobody
+// declared.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
+// A message is a sequence of fields with no header, no length, no field
+// count and no end marker.  Each field is a key, which is a varint,
+// followed by a payload whose shape the low three bits of the key
+// announce.  There are four shapes: a varint, eight fixed bytes, a
+// length-delimited run, and four fixed bytes.  Codes 3 and 4 open and
+// close a group, proto2's older nesting.  Codes 6 and 7 are not
+// defined.
 //
-// WHAT THE WIRE ACTUALLY IS.  A message is a sequence of fields and
-// nothing else — no header, no length, no field count, no end marker.
-// Each field is a KEY, which is a varint, followed by a payload whose
-// shape the low three bits of that key announce.  There are four
-// shapes: a varint, eight fixed bytes, a length-delimited run, and four
-// fixed bytes.  Two more codes, 3 and 4, open and close a group, which
-// is proto2's older nesting and is still on the wire in front of a
-// great deal of deployed software.  Codes 6 and 7 are not defined and
-// never will be.
+// Because the shape travels with the key, a reader can find the end of
+// a field it has no schema for.  `skip_at` is that rule, and it is what
+// lets `pbread` keep the fields it does not understand.
 //
-// WHY THAT MATTERS TO A READER.  Because the shape travels with the
-// key, a decoder can walk a message it has no schema for: it knows
-// where every field ends even when it knows nothing else about it.
-// That is the property `pbread`'s unknown-field preservation is built
-// on, and it is the whole reason protobuf can add a field without
-// breaking a reader that predates it.
+// The varint is LEB128: seven bits per byte, least significant group
+// first, the top bit set on every byte but the last.  This module calls
+// leb128-nv for it.  `sint32` and `sint64` fold through zigzag-nv first,
+// and varint-nv is the two composed for the sixty-four-bit case.
+// `int32` and `int64` do not fold.  A negative `int32` is sign-extended
+// to sixty-four bits and costs ten bytes on the wire (Encoding page,
+// section "Signed Integers").
 //
-// WHERE THE VARINT COMES FROM.  leb128-nv.  Protocol buffers' varint IS
-// LEB128 — base 128, least significant group first, the top bit of
-// every byte but the last set — so this module calls that package
-// rather than carrying a second copy of it.  `sint32` and `sint64` fold
-// through zigzag-nv first, and `varint-nv` is the two composed for the
-// sixty-four-bit case.  `int32` and `int64` do NOT fold: a negative
-// `int32` is sign-extended to sixty-four bits and spends ten bytes on
-// the wire, which is the encoding's best-known wart and the entire
-// reason `sint32` exists.  `int32_to_wire` is that sign extension
-// named, so a reader of an implementation can see it happen.
-//
-// EVERY WRITE TAKES THE CALLER'S BUFFER.  `write_*_into` takes a
-// `Cursor` over memory the caller already owns and answers how many
-// bytes it wrote; nothing here allocates.  A caller that wants a
-// `Bytes` builds one in `pbwrite`, which is the module that knows how
-// long a message is going to be.
+// Every writer takes a `Cursor` over memory the caller owns and answers
+// how many bytes it wrote, or `PbBufferTooSmall` before writing
+// anything.  The fixed-width writers put one byte at a time, so the
+// cursor's own byte order does not matter.  Nothing here allocates.
 
 use std.bytes
+use leb128
+use zigzag
 use varint
 
 // Which of the six shapes a key announces.
-//
-// The three bits are the whole of the wire's self-description.  A
-// reader that does not know a field still knows how long it is, which
-// is what lets `pbread` keep it.
 pub enum PbWireType
     // Code 0: a varint payload.  `int32`, `int64`, `uint32`, `uint64`,
     // `sint32`, `sint64`, `bool` and every enum.
@@ -57,19 +44,16 @@ pub enum PbWireType
     // `bytes`, every submessage, every map entry and every packed
     // repeated field.
     PbWireBytes
-    // Code 3: the start of a group, proto2's older nesting.  Deprecated
-    // since 2008 and still readable, because the messages that use it
-    // are still in production.
+    // Code 3: the start of a group.
     PbWireStartGroup
-    // Code 4: the end of a group.  Carries the same field number as the
-    // start it closes, which is what makes a group skippable without a
-    // schema.
+    // Code 4: the end of a group.  It carries the same field number as
+    // the start it closes.
     PbWireEndGroup
     // Code 5: four fixed bytes, little-endian.  `fixed32`, `sfixed32`,
     // `float`.
     PbWireFixed32
 
-// The wire type's own code, `0 ..= 5` — the low three bits of a key.
+// The wire type's own code, `0 ..= 5`: the low three bits of a key.
 //
 // ```novo
 // use pbwire
@@ -78,88 +62,123 @@ pub enum PbWireType
 //     println("${pbwire.wire_code(PbWireBytes)}")   // 2
 // ```
 pub fn wire_code(w: PbWireType) -> Int []
-    todo("pbwire.wire_code")
+    match w
+        PbWireVarint     => 0
+        PbWireFixed64    => 1
+        PbWireBytes      => 2
+        PbWireStartGroup => 3
+        PbWireEndGroup   => 4
+        PbWireFixed32    => 5
 
-// The wire type a code names, or `None` for 6 and 7.
-//
-// `None` rather than a refusal because the caller that asks is
-// `read_tag_at`, which has an offset to attach and this function does
-// not.
+// The wire type a code names, or `None` for 6, 7 and anything outside
+// `0 ..= 7`.
 pub fn wire_of_code(code: Int) -> ?PbWireType []
-    todo("pbwire.wire_of_code")
+    match code
+        0 => Some(PbWireVarint)
+        1 => Some(PbWireFixed64)
+        2 => Some(PbWireBytes)
+        3 => Some(PbWireStartGroup)
+        4 => Some(PbWireEndGroup)
+        5 => Some(PbWireFixed32)
+        _ => None
 
 // The eighteen types a `.proto` field can declare.
 //
-// The numbering is `FieldDescriptorProto.Type`'s, so `type_code`
-// answers what a descriptor set carries and `type_of_code` reads one
-// back.  The variants are spelled with the prefix the registry's
-// global type namespace needs; `type_proto_name` answers the name a
-// `.proto` file writes.
+// The order is `FieldDescriptorProto.Type`'s, so `type_code` answers
+// the number a descriptor set carries.  `type_proto_name` answers the
+// keyword a `.proto` file writes.
 pub enum PbFieldType
     // Eight bytes, IEEE 754 binary64.
     PbTypeDouble
-    // Four bytes, IEEE 754 binary32.  A `Float` in novo-lang is
-    // sixty-four bits, so a round trip through this type loses
-    // precision the same way it does everywhere else.
+    // Four bytes, IEEE 754 binary32.  A novo-lang `Float` is sixty-four
+    // bits, so a value written as `float` is rounded.
     PbTypeFloat
-    // A varint, two's complement.  Negative values spend ten bytes.
+    // A varint, two's complement.  Negative values cost ten bytes.
     PbTypeInt64
-    // A varint, unsigned.  Values at or above 2^63 are not
-    // representable as a novo-lang `Int`; the README names that limit.
+    // A varint, unsigned.  Values at or above 2^63 are held as the
+    // negative `Int` with the same sixty-four bits.
     PbTypeUint64
-    // A varint, two's complement, sign-extended to sixty-four bits
-    // before it is written.  This is the wart: `-1` costs ten bytes.
+    // A varint, two's complement, sign-extended to sixty-four bits.
+    // `-1` costs ten bytes.
     PbTypeInt32
     // Eight fixed bytes, unsigned.
     PbTypeFixed64
     // Four fixed bytes, unsigned.
     PbTypeFixed32
-    // A varint, 0 or 1.  A decoder treats every non-zero varint as
-    // true, which is what the specification requires and not a
-    // kindness.
+    // A varint, 0 or 1.  A reader takes every non-zero varint as true.
     PbTypeBool
-    // Length-delimited, and the bytes must be UTF-8.  A decoder that
-    // let non-UTF-8 through would hand a caller a `Str` whose length
-    // nobody agrees on, so `pbread` refuses it.
+    // Length-delimited UTF-8 text.
     PbTypeString
     // A group: an open key, fields, a close key.  proto2 only.
     PbTypeGroup
-    // Length-delimited: a whole submessage, nested.
+    // Length-delimited: a whole submessage.
     PbTypeMessage
-    // Length-delimited, and any octets at all.  The field for a digest,
-    // a key, a compressed payload.
+    // Length-delimited: any octets.
     PbTypeBytes
     // A varint, unsigned, below 2^32.
     PbTypeUint32
-    // A varint holding an enum's number.  proto3 enums are open: a
-    // value the reader's schema does not name is kept rather than
-    // refused, which is what makes adding an enum value compatible.
+    // A varint holding an enum value's number.
     PbTypeEnum
     // Four fixed bytes, two's complement.
     PbTypeSfixed32
     // Eight fixed bytes, two's complement.
     PbTypeSfixed64
-    // A varint over a zigzag fold: small negatives are small.  What
-    // `int32` should have been.
+    // A varint over the zigzag fold of a thirty-two-bit value.
     PbTypeSint32
-    // A varint over a zigzag fold, sixty-four bits.
+    // A varint over the zigzag fold of a sixty-four-bit value.
     PbTypeSint64
 
 // The `FieldDescriptorProto.Type` number, `1 ..= 18`.
 pub fn type_code(t: PbFieldType) -> Int []
-    todo("pbwire.type_code")
+    match t
+        PbTypeDouble   => 1
+        PbTypeFloat    => 2
+        PbTypeInt64    => 3
+        PbTypeUint64   => 4
+        PbTypeInt32    => 5
+        PbTypeFixed64  => 6
+        PbTypeFixed32  => 7
+        PbTypeBool     => 8
+        PbTypeString   => 9
+        PbTypeGroup    => 10
+        PbTypeMessage  => 11
+        PbTypeBytes    => 12
+        PbTypeUint32   => 13
+        PbTypeEnum     => 14
+        PbTypeSfixed32 => 15
+        PbTypeSfixed64 => 16
+        PbTypeSint32   => 17
+        PbTypeSint64   => 18
 
 // The field type a descriptor's number names, or `None` for 0 and for
 // anything above 18.
 pub fn type_of_code(code: Int) -> ?PbFieldType []
-    todo("pbwire.type_of_code")
+    match code
+        1  => Some(PbTypeDouble)
+        2  => Some(PbTypeFloat)
+        3  => Some(PbTypeInt64)
+        4  => Some(PbTypeUint64)
+        5  => Some(PbTypeInt32)
+        6  => Some(PbTypeFixed64)
+        7  => Some(PbTypeFixed32)
+        8  => Some(PbTypeBool)
+        9  => Some(PbTypeString)
+        10 => Some(PbTypeGroup)
+        11 => Some(PbTypeMessage)
+        12 => Some(PbTypeBytes)
+        13 => Some(PbTypeUint32)
+        14 => Some(PbTypeEnum)
+        15 => Some(PbTypeSfixed32)
+        16 => Some(PbTypeSfixed64)
+        17 => Some(PbTypeSint32)
+        18 => Some(PbTypeSint64)
+        _  => None
 
 // The keyword a `.proto` file writes for this type: `"sint32"`,
 // `"bytes"`, `"double"`.
 //
-// `"message"` and `"enum"` for the two that a `.proto` file spells with
-// a type NAME instead of a keyword; `pbdesc.PbField.type_name` is where
-// that name lives.
+// `"message"`, `"enum"` and `"group"` for the three that a `.proto`
+// file spells with a type name instead of a keyword.
 //
 // ```novo
 // use pbwire
@@ -168,13 +187,30 @@ pub fn type_of_code(code: Int) -> ?PbFieldType []
 //     println(pbwire.type_proto_name(PbTypeSfixed64))   // sfixed64
 // ```
 pub fn type_proto_name(t: PbFieldType) -> Str []
-    todo("pbwire.type_proto_name")
+    match t
+        PbTypeDouble   => "double"
+        PbTypeFloat    => "float"
+        PbTypeInt64    => "int64"
+        PbTypeUint64   => "uint64"
+        PbTypeInt32    => "int32"
+        PbTypeFixed64  => "fixed64"
+        PbTypeFixed32  => "fixed32"
+        PbTypeBool     => "bool"
+        PbTypeString   => "string"
+        PbTypeGroup    => "group"
+        PbTypeMessage  => "message"
+        PbTypeBytes    => "bytes"
+        PbTypeUint32   => "uint32"
+        PbTypeEnum     => "enum"
+        PbTypeSfixed32 => "sfixed32"
+        PbTypeSfixed64 => "sfixed64"
+        PbTypeSint32   => "sint32"
+        PbTypeSint64   => "sint64"
 
 // The wire type a field type travels as.
 //
-// The many-to-few map that is the reason a reader can skip a field it
-// does not know: eighteen declared types collapse onto four shapes,
-// and the shape is what the key carries.
+// Eighteen declared types map onto six shapes, and the shape is what
+// the key carries.
 //
 // ```novo
 // use pbwire
@@ -183,30 +219,40 @@ pub fn type_proto_name(t: PbFieldType) -> Str []
 //     println("${pbwire.wire_code(pbwire.wire_for(PbTypeSint64))}")   // 0
 // ```
 pub fn wire_for(t: PbFieldType) -> PbWireType []
-    todo("pbwire.wire_for")
+    match t
+        PbTypeDouble   => PbWireFixed64
+        PbTypeFixed64  => PbWireFixed64
+        PbTypeSfixed64 => PbWireFixed64
+        PbTypeFloat    => PbWireFixed32
+        PbTypeFixed32  => PbWireFixed32
+        PbTypeSfixed32 => PbWireFixed32
+        PbTypeString   => PbWireBytes
+        PbTypeMessage  => PbWireBytes
+        PbTypeBytes    => PbWireBytes
+        PbTypeGroup    => PbWireStartGroup
+        _              => PbWireVarint
 
 // The lowest field number a message may declare: 1.
 pub fn min_field_number() -> Int []
-    todo("pbwire.min_field_number")
+    1
 
 // The highest: 536,870,911, which is what twenty-nine bits leave after
 // the three wire-type bits of a key.
 pub fn max_field_number() -> Int []
-    todo("pbwire.max_field_number")
+    536870911
 
 // The first number of the range the descriptor language keeps for
 // itself: 19,000.
 pub fn reserved_first() -> Int []
-    todo("pbwire.reserved_first")
+    19000
 
-// The last: 19,999.
+// The last number of that range: 19,999.
 //
 // A `.proto` file may not declare a field in `19000 ..= 19999`, and
-// `pbwrite` refuses to write one.  A message that ARRIVES carrying one
-// is read, because a peer's mistake is not a reason to drop a
-// connection.
+// `pbwrite` refuses to write one.  A message that arrives carrying one
+// is read.
 pub fn reserved_last() -> Int []
-    todo("pbwire.reserved_last")
+    19999
 
 // Whether `n` is a field number a message may declare: in
 // `1 ..= 536870911` and outside the reserved range.
@@ -219,19 +265,22 @@ pub fn reserved_last() -> Int []
 //     // true false
 // ```
 pub fn is_field_number(n: Int) -> Bool []
-    todo("pbwire.is_field_number")
+    in_range(n) and (n < reserved_first() or n > reserved_last())
+
+fn in_range(n: Int) -> Bool
+    n >= min_field_number() and n <= max_field_number()
 
 // A field's number and the shape its payload takes: the two facts a key
-// carries and the only two.
+// carries.
 pub struct PbTag
     // `1 ..= 536870911`.
     field: Int
     // Which of the six shapes follows.
     wire: PbWireType
 
-// Build a tag.
+// Build a tag.  Nothing is checked until the tag is written.
 pub fn tag(field: Int, w: PbWireType) -> PbTag []
-    todo("pbwire.tag")
+    PbTag { field: field, wire: w }
 
 // The key integer: the field number shifted up three, plus the wire
 // code.
@@ -243,19 +292,20 @@ pub fn tag(field: Int, w: PbWireType) -> PbTag []
 //     println("${pbwire.key_of(pbwire.tag(1, PbWireBytes))}")   // 10
 // ```
 pub fn key_of(t: PbTag) -> Int []
-    todo("pbwire.key_of")
+    (t.field << 3) | wire_code(t.wire)
 
 // The tag a key integer names, or `None` when the field number is zero
-// or the wire code is 6 or 7.
+// or above 536,870,911, or the wire code is 6 or 7.
 pub fn tag_of_key(key: Int) -> ?PbTag []
-    todo("pbwire.tag_of_key")
+    let field = key >>> 3
+    if not in_range(field)
+        return None
+    match wire_of_code(key & 7)
+        Some(w) => Some(PbTag { field: field, wire: w })
+        None    => None
 
-// How many bytes this tag's key occupies: 1 for fields 1 through 15,
-// 2 through 31, 3 through 4,095, and so on.
-//
-// This is why a `.proto` file that expects to be hot puts its
-// frequently set fields in `1 ..= 15`, and it is worth knowing before
-// the numbers are chosen rather than after.
+// How many bytes this tag's key occupies: 1 for fields 1 to 15, 2 for
+// fields to 2,047, 3 for fields to 262,143, and so on.
 //
 // ```novo
 // use pbwire
@@ -265,29 +315,25 @@ pub fn tag_of_key(key: Int) -> ?PbTag []
 //     // 1 2
 // ```
 pub fn key_len(t: PbTag) -> Int []
-    todo("pbwire.key_len")
+    leb128.encoded_len(key_of(t))
 
 // A tag read out of a buffer, and how many bytes its key took.
-//
-// The pair is one value rather than two returns because a reader that
-// has the tag and not the length cannot find the payload.
 pub struct PbTagAt
     tag: PbTag
     len: Int
 
 // Read the key at `off`.
 //
-// An offset outside the buffer is `PbTruncated` rather than a panic:
-// an offset derived from bytes that arrived is input, and input is
-// never a reason to crash.
+// The wire type is checked on the key's first byte, before the rest of
+// the varint, because the low three bits are always there.  An offset
+// outside the buffer is `PbTruncated`.
 //
 // ```novo
 // use std.bytes
 // use pbwire
 //
 // fn main() [io]
-//     // 0x0a: field 1, length-delimited — the first key of almost
-//     // every message anyone has ever written.
+//     // 0x0a: field 1, length-delimited.
 //     let buf = bytes.from_hex("0a03616263") ?? bytes.zeros(0)
 //     match pbwire.read_tag_at(buf, 0)
 //         Ok(t)  => println("${t.tag.field} ${pbwire.wire_code(t.tag.wire)} ${t.len}")
@@ -295,14 +341,49 @@ pub struct PbTagAt
 //     // 1 2 1
 // ```
 pub fn read_tag_at(src: Bytes, off: Int) -> Result<PbTagAt, PbDecodeError> []
-    todo("pbwire.read_tag_at")
+    let first = byte(src, off)
+    if first < 0
+        return Err(PbTruncated(at: off, need: 1))
+    let code = first & 7
+    let w = wire_of_code(code) ?? PbWireVarint
+    if code > 5
+        return Err(PbUnknownWireType(at: off, wire: code))
+    let k = read_varint_at(src, off)!
+    let field = k.value >>> 3
+    if field == 0
+        return Err(PbZeroFieldNumber(at: off))
+    if field > max_field_number()
+        return Err(PbFieldNumberTooLarge(at: off, field: field))
+    Ok(PbTagAt { tag: PbTag { field: field, wire: w }, len: k.len })
 
 // Write the key at the cursor and answer the byte count.
 //
-// `PbBadFieldNumber` for a number outside the range, and
-// `PbReservedFieldNumber` for one inside `19000 ..= 19999`.
+// `PbBadFieldNumber` for a number outside the range,
+// `PbReservedFieldNumber` for one inside `19000 ..= 19999`, and
+// `PbBufferTooSmall` when the key does not fit.
 pub fn write_tag_into(t: PbTag, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbwire.write_tag_into")
+    check_field(t.field)!
+    write_varint_into(key_of(t), dst)
+
+// Refuse a field number a writer may not produce.
+fn check_field(field: Int) -> Result<Unit, PbEncodeError>
+    if not in_range(field)
+        return Err(PbBadFieldNumber(field: field))
+    if field >= reserved_first() and field <= reserved_last()
+        return Err(PbReservedFieldNumber(field: field))
+    Ok(())
+
+// Refuse a write of `need` bytes that the cursor has no room for.
+fn check_room(need: Int, dst: Cursor) -> Result<Unit, PbEncodeError>
+    if dst.remaining() < need
+        return Err(PbBufferTooSmall(need: need, left: dst.remaining()))
+    Ok(())
+
+// The byte at `i`, or -1 outside the buffer.
+fn byte(src: Bytes, i: Int) -> Int
+    if i < 0
+        return 0 - 1
+    bytes.byte_at(src, i) ?? (0 - 1)
 
 // ── the scalar codings ───────────────────────────────────────────────
 
@@ -316,25 +397,25 @@ pub struct PbFloatAt
     value: Float
     len: Int
 
-// Write a plain varint — `uint32`, `uint64`, `bool`, an enum — and
-// answer the byte count.
+// Write a plain varint (`uint32`, `uint64`, `bool`, an enum) and answer
+// the byte count.
 //
-// leb128-nv's encoding, unchanged.  A negative value is written as its
-// unsigned sixty-four-bit pattern, which is what `int64` requires and
-// what makes `-1` ten bytes long.
+// A negative value is written as its unsigned sixty-four-bit pattern,
+// which is what `int64` requires and why `-1` is ten bytes long.
 pub fn write_varint_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbwire.write_varint_into")
+    check_room(leb128.encoded_len(v), dst)!
+    Ok(leb128.encode_into(dst, v))
 
-// Write an `int32`: sign-extend to sixty-four bits, then varint.
+// Write an `int32`: sign-extended to sixty-four bits, then a varint.
 //
-// The sign extension is the specification's, and it is why `int32` and
-// `int64` are wire-compatible in both directions and why a negative
-// `int32` costs ten bytes.  A value outside `-2^31 ..= 2^31 - 1` is
-// `PbValueOutOfRange` rather than silently truncated.
+// A value outside `-2^31 ..= 2^31 - 1` is `PbValueOutOfRange` with
+// field 0.
 pub fn write_int32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbwire.write_int32_into")
+    if not zigzag.fits32(v)
+        return Err(PbValueOutOfRange(field: 0, value: v))
+    write_varint_into(int32_to_wire(v), dst)
 
-// Write an `sint32`: zigzag-nv's thirty-two-bit fold, then varint.
+// Write an `sint32`: zigzag-nv's thirty-two-bit fold, then a varint.
 //
 // ```novo
 // use std.bytes
@@ -343,168 +424,360 @@ pub fn write_int32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> [
 // fn main() [io]
 //     var c = bytes.cursor_le(bytes.zeros(8))
 //     match pbwire.write_sint32_into(0 - 1, c)
-//         Ok(n)  => println("${n}")   // 1 — where int32 would spend ten
+//         Ok(n)  => println("${n}")   // 1, where an int32 costs ten
 //         Err(e) => println(e.message())
 // ```
 pub fn write_sint32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbwire.write_sint32_into")
+    if not zigzag.fits32(v)
+        return Err(PbValueOutOfRange(field: 0, value: v))
+    write_varint_into(zigzag.encode32(v), dst)
 
-// Write an `sint64`: the sixty-four-bit fold, then varint — which is
-// varint-nv's `encode_into` exactly.
+// Write an `sint64`: the sixty-four-bit fold, then a varint, which is
+// varint-nv's `encode_into`.
 pub fn write_sint64_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbwire.write_sint64_into")
+    check_room(varint.encoded_len(v), dst)!
+    Ok(varint.encode_into(dst, v))
 
-// Write four fixed bytes, little-endian: `fixed32`, `sfixed32`.
+// Write four fixed bytes, little-endian: `fixed32` or `sfixed32`.
+//
+// Any value in `-2^31 ..= 2^32 - 1` is accepted and written as its low
+// thirty-two bits, so one writer serves both types.
 pub fn write_fixed32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbwire.write_fixed32_into")
+    if v < zigzag.min32() or v > 0xffffffff
+        return Err(PbValueOutOfRange(field: 0, value: v))
+    check_room(4, dst)!
+    put_le(v, 4, dst)
+    Ok(4)
 
-// Write eight fixed bytes, little-endian: `fixed64`, `sfixed64`.
+// Write eight fixed bytes, little-endian: `fixed64` or `sfixed64`.
 pub fn write_fixed64_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbwire.write_fixed64_into")
+    check_room(8, dst)!
+    put_le(v, 8, dst)
+    Ok(8)
+
+// Write `n` little-endian bytes of `v`.
+fn put_le(v: Int, n: Int, var dst: Cursor)
+    for i in 0..n
+        dst.put_u8((v >>> (8 * i)) & 0xff)
 
 // Write a `float`: IEEE 754 binary32, little-endian, four bytes.
 //
-// A novo-lang `Float` is sixty-four bits, so this narrows.  The
-// narrowing is the caller's decision — the field's declared type made
-// it — and it is named here so nobody has to discover it from a
-// changed value.
+// A novo-lang `Float` is sixty-four bits, so this rounds to the nearest
+// binary32, ties to even, as `float32_bits` does.
 pub fn write_float_into(v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbwire.write_float_into")
+    check_room(4, dst)!
+    put_le(float32_bits(v), 4, dst)
+    Ok(4)
 
 // Write a `double`: IEEE 754 binary64, little-endian, eight bytes.
 pub fn write_double_into(v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbwire.write_double_into")
+    check_room(8, dst)!
+    put_le(float.to_bits(v), 8, dst)
+    Ok(8)
 
-// Read a plain varint at `off`.
+// Read a plain varint at `off`: its sixty-four-bit pattern.
+//
+// `PbTruncated` when the input ends with the continuation bit set, and
+// `PbVarintOverflow` when the varint passes sixty-four bits.
 pub fn read_varint_at(src: Bytes, off: Int) -> Result<PbIntAt, PbDecodeError> []
-    todo("pbwire.read_varint_at")
+    match leb128.decode_at(src, off)
+        Ok(d)  => Ok(PbIntAt { value: d.value, len: d.len })
+        Err(e) =>
+            match e
+                Truncated(_) => Err(PbTruncated(at: off, need: 1))
+                Overflow(_)  => Err(PbVarintOverflow(at: off, bytes: run_len(src, off)))
+
+// The length of the run of bytes a varint at `off` spans: every byte
+// with its top bit set, and the byte that ends the run when there is
+// one.
+fn run_len(src: Bytes, off: Int) -> Int
+    var n = 0
+    var b = byte(src, off)
+    while b >= 128
+        n = n + 1
+        b = byte(src, off + n)
+    if b >= 0
+        n = n + 1
+    n
 
 // Read an `int32` at `off`: the varint, folded back onto thirty-two
 // bits.
 //
-// A ten-byte varint whose high bits are the sign extension reads back
-// as the negative it was; a value that does not fit thirty-two bits
-// after that is truncated the way every implementation truncates it,
-// because the specification says to.
+// A ten-byte sign-extended varint reads back as the negative it was.
+// Bits above the thirty-second are dropped, as every implementation
+// drops them.
 pub fn read_int32_at(src: Bytes, off: Int) -> Result<PbIntAt, PbDecodeError> []
-    todo("pbwire.read_int32_at")
+    let d = read_varint_at(src, off)!
+    Ok(PbIntAt { value: int32_of_wire(d.value), len: d.len })
 
 // Read an `sint32` at `off`: the varint, then zigzag-nv's
 // thirty-two-bit unfold.
 pub fn read_sint32_at(src: Bytes, off: Int) -> Result<PbIntAt, PbDecodeError> []
-    todo("pbwire.read_sint32_at")
+    let d = read_varint_at(src, off)!
+    Ok(PbIntAt { value: zigzag.decode32(d.value), len: d.len })
 
 // Read an `sint64` at `off`: the varint, then the sixty-four-bit
-// unfold — varint-nv's `decode_at`.
+// unfold.
 pub fn read_sint64_at(src: Bytes, off: Int) -> Result<PbIntAt, PbDecodeError> []
-    todo("pbwire.read_sint64_at")
+    let d = read_varint_at(src, off)!
+    Ok(PbIntAt { value: zigzag.decode64(d.value), len: d.len })
+
+// Read `n` little-endian bytes at `off` as an unsigned pattern.
+fn get_le(src: Bytes, off: Int, n: Int) -> Result<Int, PbDecodeError>
+    let have = bytes.len(src) - off
+    if off < 0 or have < n
+        let short = if off < 0 then n else n - have
+        return Err(PbTruncated(at: off, need: short))
+    var v = 0
+    for i in 0..n
+        v = v | (byte(src, off + i) << (8 * i))
+    Ok(v)
 
 // Read four little-endian bytes at `off` as an unsigned `fixed32`.
 pub fn read_fixed32_at(src: Bytes, off: Int) -> Result<PbIntAt, PbDecodeError> []
-    todo("pbwire.read_fixed32_at")
+    Ok(PbIntAt { value: get_le(src, off, 4)!, len: 4 })
 
 // Read four little-endian bytes at `off` as a signed `sfixed32`.
 pub fn read_sfixed32_at(src: Bytes, off: Int) -> Result<PbIntAt, PbDecodeError> []
-    todo("pbwire.read_sfixed32_at")
+    Ok(PbIntAt { value: int32_of_wire(get_le(src, off, 4)!), len: 4 })
 
 // Read eight little-endian bytes at `off` as a `fixed64`.
 //
-// The value is handed back as a novo-lang `Int`, which is signed, so a
-// `fixed64` at or above 2^63 comes back negative.  That is the same
-// sixty-four bits and a different reading of them; the README's limits
-// section says so, and `pbdyn` carries the raw bytes for a caller that
-// needs the other one.
+// A novo-lang `Int` is signed, so a `fixed64` at or above 2^63 comes
+// back negative: the same sixty-four bits, read the other way.
+// `pbdyn.uint64_text` prints the unsigned reading.
 pub fn read_fixed64_at(src: Bytes, off: Int) -> Result<PbIntAt, PbDecodeError> []
-    todo("pbwire.read_fixed64_at")
+    Ok(PbIntAt { value: get_le(src, off, 8)!, len: 8 })
 
 // Read eight little-endian bytes at `off` as a signed `sfixed64`.
 pub fn read_sfixed64_at(src: Bytes, off: Int) -> Result<PbIntAt, PbDecodeError> []
-    todo("pbwire.read_sfixed64_at")
+    Ok(PbIntAt { value: get_le(src, off, 8)!, len: 8 })
 
-// Read four little-endian bytes at `off` as a binary32 `float`, widened
-// to a novo-lang `Float`.
+// Read four little-endian bytes at `off` as a binary32 `float`,
+// widened exactly to a novo-lang `Float`.
 pub fn read_float_at(src: Bytes, off: Int) -> Result<PbFloatAt, PbDecodeError> []
-    todo("pbwire.read_float_at")
+    Ok(PbFloatAt { value: float_of_bits32(get_le(src, off, 4)!), len: 4 })
 
 // Read eight little-endian bytes at `off` as a binary64 `double`.
 pub fn read_double_at(src: Bytes, off: Int) -> Result<PbFloatAt, PbDecodeError> []
-    todo("pbwire.read_double_at")
+    Ok(PbFloatAt { value: float.from_bits(get_le(src, off, 8)!), len: 8 })
+
+// ── binary32 ─────────────────────────────────────────────────────────
+
+// The IEEE 754 binary32 bit pattern nearest `v`, as a value in
+// `0 ..= 2^32 - 1`.
+//
+// Rounding is to nearest, ties to even (IEEE 754 section 4.3.1).  A
+// value too large for binary32 becomes an infinity, a value too small
+// becomes a zero of the same sign, and a NaN keeps the top
+// twenty-two bits of its payload with the quiet bit set.
+//
+// ```novo
+// use pbwire
+//
+// fn main() [io]
+//     println("${pbwire.float32_bits(1.0)}")   // 1065353216
+// ```
+pub fn float32_bits(v: Float) -> Int []
+    let b = float.to_bits(v)
+    let sign = (b >>> 63) << 31
+    let exp = (b >>> 52) & 0x7ff
+    let mant = b & 0xfffffffffffff
+    if exp == 0x7ff
+        if mant == 0
+            return sign | 0x7f800000
+        return sign | 0x7fc00000 | (mant >>> 29)
+    if exp == 0
+        return sign
+    let m = mant | (1 << 52)
+    let e = exp - 1023
+    if e > 127
+        return sign | 0x7f800000
+    if e >= 0 - 126
+        let q = round_shift(m, 29)
+        if q == 1 << 24
+            if e + 1 > 127
+                return sign | 0x7f800000
+            return sign | ((e + 128) << 23)
+        return sign | ((e + 127) << 23) | (q & 0x7fffff)
+    let shift = 29 + (0 - 126 - e)
+    if shift >= 54
+        return sign
+    sign | round_shift(m, shift)
+
+// `m` shifted right by `shift` bits, rounded to nearest, ties to even.
+fn round_shift(m: Int, shift: Int) -> Int
+    let q = m >>> shift
+    let rem = m & ((1 << shift) - 1)
+    let half = 1 << (shift - 1)
+    if rem > half or (rem == half and (q & 1) == 1)
+        return q + 1
+    q
+
+// The `Float` a binary32 bit pattern stands for.
+//
+// Every binary32 value, subnormals included, is exactly representable
+// as a binary64, so nothing is rounded.  Only the low thirty-two bits
+// of `bits` are read.
+//
+// ```novo
+// use pbwire
+//
+// fn main() [io]
+//     println("${pbwire.float_of_bits32(1065353216)}")   // 1.0
+// ```
+pub fn float_of_bits32(bits: Int) -> Float []
+    let sign = ((bits >>> 31) & 1) << 63
+    let e8 = (bits >>> 23) & 0xff
+    let m = bits & 0x7fffff
+    if e8 == 0xff
+        return float.from_bits(sign | (0x7ff << 52) | (m << 29))
+    if e8 == 0
+        if m == 0
+            return float.from_bits(sign)
+        var mm = m
+        var e = 0 - 126
+        while (mm & 0x800000) == 0
+            mm = mm << 1
+            e = e - 1
+        return float.from_bits(sign | ((e + 1023) << 52) | ((mm & 0x7fffff) << 29))
+    float.from_bits(sign | ((e8 - 127 + 1023) << 52) | (m << 29))
+
+// ── text ─────────────────────────────────────────────────────────────
+
+// The offset of the first byte in `data[off .. off + len]` that breaks
+// UTF-8, or -1 when the whole range is well formed.
+//
+// The rule is RFC 3629 section 4: no overlong forms, no surrogates, and
+// nothing above U+10FFFF.  A `string` field must pass it.
+//
+// ```novo
+// use std.bytes
+// use pbwire
+//
+// fn main() [io]
+//     let b = bytes.from_hex("61ff62") ?? bytes.zeros(0)
+//     println("${pbwire.first_non_utf8(b, 0, 3)}")   // 1
+// ```
+pub fn first_non_utf8(data: Bytes, off: Int, len: Int) -> Int []
+    let end = off + len
+    var i = off
+    while i < end
+        let n = utf8_len_at(data, i, end)
+        if n == 0
+            return i
+        i = i + n
+    0 - 1
+
+// The length of the well-formed UTF-8 sequence at `i`, or 0.
+fn utf8_len_at(data: Bytes, i: Int, end: Int) -> Int
+    let c0 = byte(data, i)
+    if c0 < 128
+        return 1
+    var need = 0
+    var lo = 128
+    var hi = 191
+    if c0 >= 194 and c0 <= 223
+        need = 1
+    else if c0 >= 224 and c0 <= 239
+        need = 2
+        if c0 == 224
+            lo = 160
+        if c0 == 237
+            hi = 159
+    else if c0 >= 240 and c0 <= 244
+        need = 3
+        if c0 == 240
+            lo = 144
+        if c0 == 244
+            hi = 143
+    else
+        return 0
+    if i + need >= end + 1
+        return 0
+    let c1 = byte(data, i + 1)
+    if c1 < lo or c1 > hi
+        return 0
+    for k in 2..need + 1
+        let c = byte(data, i + k)
+        if c < 128 or c > 191
+            return 0
+    need + 1
 
 // ── sizes, and the sign extension named ──────────────────────────────
 
-// How many bytes a plain varint of `v` will occupy, without writing it.
-//
-// What a writer sizing a submessage calls, once per field, before it
-// writes anything — see `pbwrite.encoded_len`.
+// How many bytes a plain varint of `v` occupies, without writing it.
 pub fn varint_len(v: Int) -> Int []
-    todo("pbwire.varint_len")
+    leb128.encoded_len(v)
 
-// How many bytes an `int32` of `v` will occupy: ten for every negative
+// How many bytes an `int32` of `v` occupies: ten for every negative
 // value, one to five otherwise.
 pub fn int32_len(v: Int) -> Int []
-    todo("pbwire.int32_len")
+    leb128.encoded_len(int32_to_wire(v))
 
-// How many bytes an `sint32` of `v` will occupy: magnitude decides,
-// not sign.
+// How many bytes an `sint32` of `v` occupies: the magnitude decides,
+// not the sign.
 pub fn sint32_len(v: Int) -> Int []
-    todo("pbwire.sint32_len")
+    leb128.encoded_len(zigzag.encode32(v))
 
-// How many bytes an `sint64` of `v` will occupy.
+// How many bytes an `sint64` of `v` occupies.
 pub fn sint64_len(v: Int) -> Int []
-    todo("pbwire.sint64_len")
+    varint.encoded_len(v)
 
 // The fixed payload width of a wire type: 8 for `PbWireFixed64`, 4 for
-// `PbWireFixed32`, and -1 for the three that have no fixed width.
-//
-// -1 rather than `None` because every caller of this is arithmetic that
-// would unwrap immediately, and a negative width is not a length any
-// loop would accept by accident.
+// `PbWireFixed32`, and -1 for the four that have no fixed width.
 pub fn fixed_width(w: PbWireType) -> Int []
-    todo("pbwire.fixed_width")
+    match w
+        PbWireFixed64 => 8
+        PbWireFixed32 => 4
+        _             => 0 - 1
 
-// The whole length of one field: its key, plus the length prefix when
-// the wire type has one, plus `payload`.
+// The whole length of one field: its key, the length prefix when the
+// wire type has one, and `payload`.
 //
-// `payload` is the payload's own byte count — the submessage's length,
-// the string's length in bytes, the varint's length.  This is the
-// function a writer adds up to learn how long a message is before it
-// writes the first byte of it.
+// `payload` is the payload's own byte count.  For a group it is the
+// body between the two keys, and the closing key is counted too.
 pub fn field_len(t: PbTag, payload: Int) -> Int []
-    todo("pbwire.field_len")
+    let k = key_len(t)
+    match t.wire
+        PbWireBytes      => k + leb128.encoded_len(payload) + payload
+        PbWireStartGroup => k + payload + key_len(tag(t.field, PbWireEndGroup))
+        _                => k + payload
 
-// The sixty-four-bit pattern an `int32` of `v` is written as: `v` for
-// non-negative, `v + 2^64` for negative.
+// The sixty-four-bit pattern an `int32` of `v` is written as: the low
+// thirty-two bits of `v`, sign-extended.
 //
-// Named as a function because it is the single most surprising rule on
-// this wire, and because a reader of an implementation should be able
-// to see where it happens.
+// For an `Int` in the `int32` range that pattern is `v` itself, since
+// an `Int` is already two's complement over sixty-four bits.  The
+// function exists so that the rule has a name where it is applied.
 pub fn int32_to_wire(v: Int) -> Int []
-    todo("pbwire.int32_to_wire")
+    int32_of_wire(v)
 
 // The `int32` a sixty-four-bit varint pattern stands for: the low
 // thirty-two bits, read as two's complement.
 pub fn int32_of_wire(u: Int) -> Int []
-    todo("pbwire.int32_of_wire")
+    let low = u & 0xffffffff
+    if low >= 0x80000000
+        return low - 0x100000000
+    low
 
 // ── packed repeated fields ───────────────────────────────────────────
 
 // Whether a repeated field of this type may be packed: every scalar
-// except `string`, `bytes`, `message` and `group`.
-//
-// Packing puts the elements' payloads end to end inside one
-// length-delimited field and writes the key once, which for a repeated
-// `int32` of a hundred small values is a hundred keys saved.
+// except `string` and `bytes`, and neither `message` nor `group`.
 pub fn is_packable(t: PbFieldType) -> Bool []
-    todo("pbwire.is_packable")
+    match t
+        PbTypeString  => false
+        PbTypeBytes   => false
+        PbTypeMessage => false
+        PbTypeGroup   => false
+        _             => true
 
 // Whether a repeated field of this type is packed unless the `.proto`
 // file says otherwise: true in proto3, false in proto2.
 //
-// The default flipped between the two syntaxes, which is why the
-// question takes the syntax rather than answering it once.  A DECODER
-// must accept both forms for a packable field whatever the default is
-// — the specification requires it, and it is what makes the default
-// changeable at all.
+// A reader accepts both forms for a packable field whatever the
+// default is (Encoding page, section "Packed Repeated Fields").
 //
 // ```novo
 // use pbwire
@@ -514,30 +787,134 @@ pub fn is_packable(t: PbFieldType) -> Bool []
 //     // true false
 // ```
 pub fn packed_by_default(t: PbFieldType, proto3: Bool) -> Bool []
-    todo("pbwire.packed_by_default")
+    proto3 and is_packable(t)
 
 // How many elements a packed payload of `len` bytes at `off` holds.
 //
-// For a fixed-width type that is division; for a varint type it is a
-// walk.  `PbPackedRemainder` when the payload does not divide into
-// whole elements — six bytes of packed `fixed32`, or a trailing varint
-// with its continuation bit still set.
+// A fixed-width type divides; a varint type is walked.
+// `PbPackedRemainder` when the payload does not divide into whole
+// elements, or when `t` may not be packed at all.  `PbLengthOverrun`
+// when the range passes the end of `src`.
 pub fn packed_element_count(src: Bytes, off: Int, len: Int,
                             t: PbFieldType) -> Result<Int, PbDecodeError> []
-    todo("pbwire.packed_element_count")
+    let left = bytes.len(src) - off
+    if off < 0 or len < 0 or len > left
+        return Err(PbLengthOverrun(at: off, len: len, left: left))
+    if not is_packable(t)
+        return Err(PbPackedRemainder(at: off, left: len))
+    let w = fixed_width(wire_for(t))
+    if w > 0
+        let rem = len % w
+        if rem != 0
+            return Err(PbPackedRemainder(at: off + len - rem, left: rem))
+        return Ok(len / w)
+    var n = 0
+    var i = off
+    let end = off + len
+    while i < end
+        let run = run_len(src, i)
+        if i + run > end or byte(src, i + run - 1) >= 128
+            return Err(PbPackedRemainder(at: i, left: end - i))
+        if run > 10
+            return Err(PbVarintOverflow(at: i, bytes: run))
+        i = i + run
+        n = n + 1
+    Ok(n)
 
 // ── skipping ─────────────────────────────────────────────────────────
 
 // How many bytes the payload of this tag occupies at `off`, so that a
-// reader with no schema can step over it.
+// reader with no schema can step over it.  `off` is the first byte
+// after the key.
 //
-// This is the function the whole compatibility story rests on: a field
-// nobody declared is still a field whose end is knowable, so a reader
-// built against an older `.proto` walks past a newer one's additions
-// instead of failing.  `pbread` keeps those bytes rather than
-// discarding them.
+// For `PbWireStartGroup` the answer runs to the end of the matching
+// end-group key, nested groups included, and is found with an explicit
+// stack rather than recursion.  For `PbWireEndGroup` it is 0.
 //
-// For `PbWireStartGroup` the answer spans to the matching end key,
-// nested groups included, which is the one case that needs a stack.
+// ```novo
+// use std.bytes
+// use pbwire
+//
+// fn main() [io]
+//     let buf = bytes.from_hex("0a03616263") ?? bytes.zeros(0)
+//     match pbwire.skip_at(buf, 1, pbwire.tag(1, PbWireBytes))
+//         Ok(n)  => println("${n}")   // 4
+//         Err(e) => println(e.message())
+// ```
 pub fn skip_at(src: Bytes, off: Int, t: PbTag) -> Result<Int, PbDecodeError> []
-    todo("pbwire.skip_at")
+    match t.wire
+        PbWireStartGroup => skip_group(src, off, t.field)
+        _                => skip_flat(src, off, t.wire)
+
+// The payload length of a field of any shape but a group start.
+fn skip_flat(src: Bytes, off: Int, w: PbWireType) -> Result<Int, PbDecodeError>
+    match w
+        PbWireVarint   => Ok(read_varint_at(src, off)!.len)
+        PbWireFixed64  => fixed_skip(src, off, 8)
+        PbWireFixed32  => fixed_skip(src, off, 4)
+        PbWireBytes    => Ok(delimited_at(src, off)!.len)
+        _              => Ok(0)
+
+fn fixed_skip(src: Bytes, off: Int, n: Int) -> Result<Int, PbDecodeError>
+    let have = bytes.len(src) - off
+    if have < n
+        return Err(PbTruncated(at: off, need: n - have))
+    Ok(n)
+
+// A length-delimited payload located: where its bytes start, how many
+// there are, and the whole length with the prefix.
+pub struct PbSpan
+    // The offset of the payload's first byte.
+    start: Int
+    // The payload's byte count.
+    size: Int
+    // The prefix and the payload together.
+    len: Int
+
+// Locate the length-delimited payload whose length prefix is at `off`.
+//
+// `PbLengthNotRepresentable` for a prefix above 2^63 - 1, and
+// `PbLengthOverrun` when the payload passes the end of `src`.
+//
+// ```novo
+// use std.bytes
+// use pbwire
+//
+// fn main() [io]
+//     let buf = bytes.from_hex("0a03616263") ?? bytes.zeros(0)
+//     match pbwire.delimited_at(buf, 1)
+//         Ok(s)  => println("${s.start} ${s.size} ${s.len}")   // 2 3 4
+//         Err(e) => println(e.message())
+// ```
+pub fn delimited_at(src: Bytes, off: Int) -> Result<PbSpan, PbDecodeError> []
+    let p = read_varint_at(src, off)!
+    if p.value < 0
+        return Err(PbLengthNotRepresentable(at: off))
+    let start = off + p.len
+    let left = bytes.len(src) - start
+    if p.value > left
+        return Err(PbLengthOverrun(at: off, len: p.value, left: left))
+    Ok(PbSpan { start: start, size: p.value, len: p.len + p.value })
+
+// Step over a group's body and its end key, tracking nested groups.
+fn skip_group(src: Bytes, off: Int, field: Int) -> Result<Int, PbDecodeError>
+    var open: [Int] = [field]
+    var i = off
+    while list.len(open) > 0
+        if i >= bytes.len(src)
+            return Err(PbUnclosedGroup(at: i, field: open[list.len(open) - 1]))
+        let k = read_tag_at(src, i)!
+        let top = open[list.len(open) - 1]
+        let body = i + k.len
+        match k.tag.wire
+            PbWireStartGroup =>
+                list.push(open, k.tag.field)
+                i = body
+            PbWireEndGroup   =>
+                if k.tag.field != top
+                    return Err(PbGroupMismatch(at: i, closed: k.tag.field, open: top))
+                open = list.slice(open, 0, list.len(open) - 1)
+                i = body
+            _                =>
+                i = body + skip_flat(src, body, k.tag.wire)!
+    Ok(i - off)
