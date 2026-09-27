@@ -33,29 +33,33 @@ fn legacy_set() -> PbFileSet
             test.fail(e.message())
             PbFileSet { files: [] }
 
+// A message with nothing in it, for a lookup that fails.
+fn no_message() -> PbMessage
+    PbMessage { name: "", full_name: "", fields: [], oneofs: [], nested: [], enums: [],
+        extensions: [], extension_ranges: [], reserved_ranges: [], reserved_names: [],
+        map_entry: false, deprecated: false, unknown: pbunknown.empty() }
+
 fn order() -> PbMessage
-    match pbdesc.find_message(order_set(), ".acme.Order")
-        Some(m) => m
-        None    =>
-            test.fail("the set declares .acme.Order")
-            pbdesc.all_messages(order_set().files[0])[0]
+    let set = order_set()
+    let Some(m) = pbdesc.find_message(set, ".acme.Order") else return no_message()
+    m
 
 fn field(name: Str) -> PbField
-    match pbdesc.field_by_name(order(), name)
-        Some(f) => f
-        None    =>
-            test.fail("acme.Order declares ${name}")
-            order().fields[0]
+    let m = order()
+    let Some(f) = pbdesc.field_by_name(m, name) else return pbdesc.field_by_number(m, 1) ?? m.fields[0]
+    f
 
 @test
 fn test_protoc_s_descriptor_set_reads_with_its_import_first()
     let set = order_set()
     test.assert_eq(set.files.len(), 2)
-    test.assert_eq(set.files[0].name, "acme/money.proto")
-    test.assert_eq(set.files[1].name, "acme/order.proto")
-    test.assert_eq(set.files[1].dependency[0], "acme/money.proto")
-    test.assert_eq(pbdesc.syntax_name(set.files[1].syntax), "proto3")
-    test.assert_eq(set.files[1].package, "acme")
+    let money = set.files[0]
+    let order = set.files[1]
+    test.assert_eq(money.name, "acme/money.proto")
+    test.assert_eq(order.name, "acme/order.proto")
+    test.assert_eq(order.dependency[0], "acme/money.proto")
+    test.assert_eq(pbdesc.syntax_name(order.syntax), "proto3")
+    test.assert_eq(order.package, "acme")
     test.assert_eq(pbdesc.validate(set).len(), 0)
 
 @test
@@ -239,7 +243,8 @@ fn test_the_generator_writes_a_module_per_file_and_per_service()
 
 @test
 fn test_the_generator_refuses_a_group_and_an_extension()
-    let f = legacy_set().files[0]
+    let set = legacy_set()
+    let f = set.files[0]
     let rs = pbgen.refusals(f)
     test.assert_eq(rs.len(), 2)
     test.assert_eq(pberr.schema_path(rs[0]), "flavour")

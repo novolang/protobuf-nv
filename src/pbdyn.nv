@@ -28,6 +28,7 @@ use pbread
 use pbunknown
 use pbwrite
 use pbdesc
+use pberr
 
 // One value of one field, typed by the descriptor.
 pub enum PbValue
@@ -255,8 +256,9 @@ fn value_of(set: PbFileSet, fd: PbField, v: PbRaw, start: Int, limits: PbLimits,
 // message.
 fn decode_nested(set: PbFileSet, md: PbMessage, data: Bytes, start: Int, limits: PbLimits,
                  depth: Int) -> Result<PbDynamic, PbDecodeError>
-    let pad = bytes.concat([bytes.zeros(start), data])
-    decode_range(set, md, pad, start, bytes.len(data), limits, depth)
+    match decode_range(set, md, data, 0, bytes.len(data), limits, depth)
+        Ok(m)  => Ok(m)
+        Err(e) => Err(pberr.shifted(e, start))
 
 // Store decoded values into their field.
 fn store(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m: PbDynamic, fd: PbField,

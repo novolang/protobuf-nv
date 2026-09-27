@@ -131,6 +131,38 @@ pub fn decode_offset(e: PbDecodeError) -> Int []
         PbNoSuchType(at, _)             => at
         PbTransport(at, _)              => at
 
+// The same refusal with its offset moved `by` bytes later.
+//
+// A reader that decodes a submessage out of its own buffer counts from
+// the submessage's first byte.  Shifting by the submessage's offset
+// makes the refusal count from the start of the outer message.
+//
+// ```novo
+// use pberr
+//
+// fn main() [io]
+//     let e = pberr.shifted(PbZeroFieldNumber(at: 2), 10)
+//     println("${pberr.decode_offset(e)}")   // 12
+// ```
+pub fn shifted(e: PbDecodeError, by: Int) -> PbDecodeError []
+    match e
+        PbTruncated(at, need)          => PbTruncated(at: at + by, need: need)
+        PbVarintOverflow(at, n)        => PbVarintOverflow(at: at + by, bytes: n)
+        PbUnknownWireType(at, w)       => PbUnknownWireType(at: at + by, wire: w)
+        PbZeroFieldNumber(at)          => PbZeroFieldNumber(at: at + by)
+        PbFieldNumberTooLarge(at, f)   => PbFieldNumberTooLarge(at: at + by, field: f)
+        PbLengthOverrun(at, len, left) => PbLengthOverrun(at: at + by, len: len, left: left)
+        PbLengthNotRepresentable(at)   => PbLengthNotRepresentable(at: at + by)
+        PbDepthExceeded(at, limit)     => PbDepthExceeded(at: at + by, limit: limit)
+        PbGroupMismatch(at, c, o)      => PbGroupMismatch(at: at + by, closed: c, open: o)
+        PbUnclosedGroup(at, f)         => PbUnclosedGroup(at: at + by, field: f)
+        PbNotUtf8(at, b)               => PbNotUtf8(at: at + by, byte: b)
+        PbPackedRemainder(at, left)    => PbPackedRemainder(at: at + by, left: left)
+        PbMessageTooLarge(at, len, l)  => PbMessageTooLarge(at: at + by, len: len, limit: l)
+        PbTrailingBytes(at, left)      => PbTrailingBytes(at: at + by, left: left)
+        PbNoSuchType(at, name)         => PbNoSuchType(at: at + by, name: name)
+        PbTransport(at, cause)         => PbTransport(at: at + by, cause: cause)
+
 // PbSchemaError is why a descriptor set, or a dynamic message checked
 // against one, does not describe a program.
 //

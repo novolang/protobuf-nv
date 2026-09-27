@@ -1,0 +1,226 @@
+// tests/read_tests.nv — the reader fed in chunks and given whole
+// buffers, its limits and refusals, the kept fields and the writers.
+
+use std.test
+use std.bytes
+use pbwire
+use pbread
+use pbunknown
+use pbwrite
+use pberr
+
+fn hex(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+fn chunk(h: Str) -> [u8]
+    bytes.to_byte_list(hex(h))
+
+fn walk_err(h: Str, limits: PbLimits) -> PbDecodeError
+    match pbread.walk(hex(h), limits)
+        Ok(_)  =>
+            test.fail("expected a refusal of ${h}")
+            PbTruncated(at: 0 - 1, need: 0)
+        Err(e) => e
+
+fn limits(depth: Int, size: Int) -> PbLimits
+    PbLimits { max_depth: depth, max_message: size, check_utf8: true }
+
+// ── the whole-buffer reader ─────────────────────────────────────────
+
+@test
+fn test_every_payload_shape_reads_whole()
+    // varint 1, fixed64 2, bytes 3, fixed32 5.
+    match pbread.walk(hex("08011102000000000000001a01ff2d04000000"), pbread.default_limits())
+        Ok(evs) =>
+            test.assert_eq(evs.len(), 4)
+            test.assert_eq(evs[1] == PbFieldSeen(tag: pbwire.tag(2, PbWireFixed64),
+                value: PbRawFixed64(bits: 2), at: 2, raw_len: 9), true)
+            test.assert_eq(evs[3] == PbFieldSeen(tag: pbwire.tag(5, PbWireFixed32),
+                value: PbRawFixed32(bits: 4), at: 14, raw_len: 5), true)
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_the_reader_refuses_what_is_not_protobuf_with_its_offset()
+    let d = pbread.default_limits()
+    test.assert_eq(walk_err("080100", d) == PbZeroFieldNumber(at: 2), true)
+    test.assert_eq(walk_err("08018080808010", d) == PbFieldNumberTooLarge(at: 2, field: 536870912), true)
+    test.assert_eq(walk_err("0801ff", d) == PbUnknownWireType(at: 2, wire: 7), true)
+    test.assert_eq(walk_err("080111010203", d) == PbTruncated(at: 3, need: 5), true)
+    test.assert_eq(walk_err("0801250102", d) == PbTruncated(at: 3, need: 2), true)
+    test.assert_eq(walk_err("0affffffffffffffffff01", d) == PbLengthNotRepresentable(at: 1), true)
+    test.assert_eq(walk_err("0a", d) == PbTruncated(at: 1, need: 1), true)
+    test.assert_eq(walk_err("0c", d) == PbGroupMismatch(at: 0, closed: 1, open: 0), true)
+    test.assert_eq(walk_err("0b14", d) == PbGroupMismatch(at: 1, closed: 2, open: 1), true)
+
+@test
+fn test_the_limits_bound_nesting_and_size()
+    test.assert_eq(walk_err("0b1b", limits(1, 100)) == PbDepthExceeded(at: 1, limit: 1), true)
+    test.assert_eq(walk_err("08010801", limits(10, 3)) == PbMessageTooLarge(at: 0, len: 4, limit: 3), true)
+    test.assert_eq(pbread.strict_limits().max_message, 1048576)
+    test.assert_eq(pbread.strict_limits().check_utf8, true)
+
+@test
+fn test_a_range_past_the_buffer_is_an_overrun()
+    match pbread.walk_range(hex("0801"), 1, 5, pbread.default_limits())
+        Ok(_)  => test.fail("five bytes of one")
+        Err(e) => test.assert_eq(e == PbLengthOverrun(at: 1, len: 5, left: 1), true)
+    match pbread.walk_range(hex("0801"), 0 - 1, 1, pbread.default_limits())
+        Ok(_)  => test.fail("a negative offset")
+        Err(e) => test.assert_eq(pberr.decode_offset(e), 0 - 1)
+    // A refusal inside the range counts in the whole buffer.
+    match pbread.walk_range(hex("ff0000"), 1, 2, pbread.default_limits())
+        Ok(_)  => test.fail("field 0")
+        Err(e) => test.assert_eq(e == PbZeroFieldNumber(at: 1), true)
+
+// ── the reader fed in chunks ────────────────────────────────────────
+
+fn fed(r: PbReader, h: Str) -> PbStep
+    match pbread.feed(r, chunk(h))
+        Ok(s)  => s
+        Err(e) =>
+            test.fail(e.message())
+            PbStep { reader: r, events: [], need: 0 - 1 }
+
+@test
+fn test_a_reader_waits_inside_every_shape()
+    let r = pbread.reader(pbread.default_limits())
+    // A key cut in the middle, then its field.
+    let a = fed(r, "88")
+    test.assert_eq(a.need, 1)
+    test.assert_eq(pbread.pending_len(a.reader), 1)
+    test.assert_eq(pbread.at_boundary(a.reader), false)
+    let b = fed(a.reader, "0101")
+    test.assert_eq(b.events.len(), 1)
+    test.assert_eq(pbread.offset(b.reader), 3)
+    // A fixed32 two bytes short, and a string four bytes short.
+    let c = fed(b.reader, "2d0102")
+    test.assert_eq(c.need, 2)
+    let d = fed(c.reader, "03041a05ab")
+    test.assert_eq(d.events.len(), 1)
+    test.assert_eq(d.need, 4)
+    let e = fed(d.reader, "cdef0102")
+    test.assert_eq(e.events.len(), 1)
+    test.assert_eq(e.need, 0)
+    test.assert_eq(pbread.at_boundary(e.reader), true)
+    match pbread.finish(e.reader)
+        Ok(s)  => test.assert_eq(s.events.len(), 0)
+        Err(x) => test.fail(x.message())
+
+@test
+fn test_a_reader_tracks_its_open_groups()
+    let r = pbread.reader(pbread.default_limits())
+    let a = fed(r, "0b0801")
+    test.assert_eq(pbread.depth(a.reader), 1)
+    test.assert_eq(pbread.at_boundary(a.reader), false)
+    match pbread.finish(a.reader)
+        Ok(_)  => test.fail("group 1 is open")
+        Err(e) => test.assert_eq(e == PbUnclosedGroup(at: 3, field: 1), true)
+    let b = fed(a.reader, "0c")
+    test.assert_eq(pbread.depth(b.reader), 0)
+
+@test
+fn test_finish_refuses_what_is_left_pending()
+    let r = pbread.reader(pbread.default_limits())
+    match pbread.finish(fed(r, "0a0561").reader)
+        Ok(_)  => test.fail("the string is four bytes short")
+        Err(e) => test.assert_eq(e == PbLengthOverrun(at: 1, len: 5, left: 1), true)
+    match pbread.finish(fed(r, "0896").reader)
+        Ok(_)  => test.fail("the varint is not finished")
+        Err(e) => test.assert_eq(e == PbTruncated(at: 1, need: 1), true)
+
+@test
+fn test_a_reader_refuses_a_message_past_its_limit_before_it_arrives()
+    let r = pbread.reader(limits(10, 8))
+    match pbread.feed(r, chunk("0a7f"))
+        Ok(_)  => test.fail("127 bytes announced against a limit of 8")
+        Err(e) => test.assert_eq(e == PbMessageTooLarge(at: 0, len: 129, limit: 8), true)
+    match pbread.feed(r, chunk("080108010801080108"))
+        Ok(_)  => test.fail("nine bytes fed against a limit of 8")
+        Err(e) => test.assert_eq(e == PbMessageTooLarge(at: 0, len: 9, limit: 8), true)
+    match pbread.feed(r, chunk("0b0c00"))
+        Ok(_)  => test.fail("field 0 is refused as it arrives")
+        Err(e) => test.assert_eq(e == PbZeroFieldNumber(at: 2), true)
+
+// ── packed fields ───────────────────────────────────────────────────
+
+@test
+fn test_unpack_answers_every_width()
+    match pbread.unpack(hex("0100000000000000ffffffffffffffff"), PbTypeSfixed64)
+        Ok(xs) => test.assert_eq(xs[1] == PbRawFixed64(bits: 0 - 1), true)
+        Err(e) => test.fail(e.message())
+    match pbread.unpack(hex("0000803f"), PbTypeFloat)
+        Ok(xs) => test.assert_eq(xs[0] == PbRawFixed32(bits: 0x3f800000), true)
+        Err(e) => test.fail(e.message())
+    match pbread.unpack(hex("0102"), PbTypeString)
+        Ok(_)  => test.fail("strings are not packed")
+        Err(e) => test.assert_eq(e == PbPackedRemainder(at: 0, left: 2), true)
+
+// ── keeping what is not known ───────────────────────────────────────
+
+@test
+fn test_a_group_nobody_wanted_is_kept_as_one_field()
+    // Field 1 = 1, group 2 holding field 3 = 1 and group 4, field 5 = 1.
+    let src = hex("08011318012324142801")
+    match pbread.partition(src, [1, 5], pbread.default_limits())
+        Ok(p)  =>
+            test.assert_eq(p.known.len(), 2)
+            test.assert_eq(pbunknown.count(p.unknown), 1)
+            let kept = pbunknown.fields_of(p.unknown)[0]
+            test.assert_eq(bytes.to_hex(kept.raw), "131801232414")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_group_somebody_wanted_arrives_bracketed()
+    let src = hex("08011318012324142801")
+    match pbread.partition(src, [2], pbread.default_limits())
+        Ok(p)  =>
+            test.assert_eq(p.known.len(), 5)
+            test.assert_eq(pbunknown.count(p.unknown), 2)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_kept_set_answers_by_number_and_refuses_a_small_buffer()
+    let u = pbunknown.keep(pbunknown.keep(pbunknown.empty(), pbwire.tag(1, PbWireVarint), hex("0801")),
+        pbwire.tag(2, PbWireVarint), hex("1002"))
+    test.assert_eq(pbunknown.by_number(u, 2).len(), 1)
+    test.assert_eq(pbunknown.has_number(u, 3), false)
+    test.assert_eq(pbunknown.count(pbunknown.drop_number(u, 1)), 1)
+    var c = bytes.cursor_le(bytes.zeros(3))
+    match pbunknown.write_into(u, c)
+        Ok(_)  => test.fail("four bytes in three")
+        Err(e) => test.assert_eq(e == PbBufferTooSmall(need: 4, left: 3), true)
+
+// ── drain ───────────────────────────────────────────────────────────
+
+// A source that fails at once.
+struct Broken
+    why: Str
+
+impl Read[] for Broken
+    fn read(self, n: Int) -> Result<Bytes, IoError> []
+        Err(IoOther(self.why))
+
+@test
+fn test_drain_reads_a_message_longer_than_one_read()
+    // Field 1, a 5000-byte string: the loop reads 4096 bytes at a time.
+    var c = bytes.cursor_le(bytes.zeros(pbwrite.delimited_field_len(1, 5000)))
+    let _ = pbwrite.write_bytes_field(1, bytes.zeros(5000), c)
+    let msg = c.finish()
+    let src = Buffer.from_bytes(bytes.to_byte_list(msg))
+    match pbread.drain(pbread.reader(pbread.default_limits()), src, bytes.len(msg))
+        Ok(s)  =>
+            test.assert_eq(s.events.len(), 1)
+            test.assert_eq(pbread.offset(s.reader), 5003)
+        Err(e) => test.fail(e.message())
+    src.drop()
+
+@test
+fn test_drain_reports_a_short_source_and_a_failing_one()
+    let short = Buffer.from_bytes(chunk("0896"))
+    match pbread.drain(pbread.reader(pbread.default_limits()), short, 3)
+        Ok(_)  => test.fail("two bytes of three")
+        Err(e) => test.assert_eq(e == PbTruncated(at: 2, need: 1), true)
+    short.drop()
+    match pbread.drain(pbread.reader(pbread.default_limits()), Broken { why: "gone" }, 3)
+        Ok(_)  => test.fail("the source failed")
+        Err(e) => test.assert_eq(e == PbTransport(at: 0, cause: IoOther("gone")), true)

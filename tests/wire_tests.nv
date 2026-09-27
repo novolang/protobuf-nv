@@ -1,0 +1,366 @@
+// tests/wire_tests.nv — the refusals, the scalar codings at their
+// edges, binary32 rounding, the UTF-8 rule, packed payloads and
+// skipping.
+//
+// The binary32 expectations are IEEE 754's (section 4.3.1: round to
+// nearest, ties to even) and agree with `struct.pack("<f", x)` in
+// Python.  The UTF-8 cases are RFC 3629 section 4's.
+
+use std.test
+use std.bytes
+use pbwire
+use pberr
+
+fn hex(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+fn dec_err(r: Result<PbIntAt, PbDecodeError>) -> PbDecodeError
+    match r
+        Ok(_)  =>
+            test.fail("expected a refusal")
+            PbTruncated(at: 0 - 1, need: 0)
+        Err(e) => e
+
+fn enc_err(r: Result<Int, PbEncodeError>) -> PbEncodeError
+    match r
+        Ok(_)  =>
+            test.fail("expected a refusal")
+            PbBadFieldNumber(field: 0 - 1)
+        Err(e) => e
+
+// ── the refusals render and locate ──────────────────────────────────
+
+@test
+fn test_every_decode_refusal_names_its_byte()
+    let all = [PbTruncated(at: 1, need: 2), PbVarintOverflow(at: 1, bytes: 11),
+        PbUnknownWireType(at: 1, wire: 6), PbZeroFieldNumber(at: 1),
+        PbFieldNumberTooLarge(at: 1, field: 536870912), PbLengthOverrun(at: 1, len: 9, left: 2),
+        PbLengthNotRepresentable(at: 1), PbDepthExceeded(at: 1, limit: 3),
+        PbGroupMismatch(at: 1, closed: 2, open: 3), PbUnclosedGroup(at: 1, field: 4),
+        PbNotUtf8(at: 1, byte: 255), PbPackedRemainder(at: 1, left: 2),
+        PbMessageTooLarge(at: 1, len: 9, limit: 8), PbTrailingBytes(at: 1, left: 2),
+        PbNoSuchType(at: 1, name: ".x.Y"), PbTransport(at: 1, cause: IoClosed)]
+    for e in all
+        test.assert_eq(pberr.decode_offset(e), 1)
+        test.assert_eq(str.starts_with(e.message(), "protobuf: "), true)
+    test.assert_eq(PbZeroFieldNumber(at: 4).message(),
+        "protobuf: field number 0 at byte 4, which is not a field number")
+    test.assert_eq(PbTransport(at: 3, cause: IoClosed).message(),
+        "protobuf: the source failed after 3 byte(s): closed")
+
+@test
+fn test_every_schema_refusal_names_its_path()
+    let all = [PbUnresolvedTypeName(path: "p", name: ".x"), PbDuplicateFieldNumber(path: "p", field: 1),
+        PbDuplicateName(path: "p", name: "n"), PbOneofIndexOutOfRange(path: "p", index: 2),
+        PbBadMapEntry(path: "p"), PbBadMapKeyType(path: "p", type_name: "double"),
+        PbNotInProto3(path: "p", what: "a group"), PbUnknownSyntax(path: "p", syntax: "editions"),
+        PbReservedInSchema(path: "p", field: 19000), PbUndeclaredField(path: "p", field: 9),
+        PbKindMismatch(path: "p", want: "num", got: "text"), PbNotGenerated(path: "p", what: "a group")]
+    for e in all
+        test.assert_eq(pberr.schema_path(e), "p")
+        test.assert_eq(str.contains(e.message(), "p "), true)
+
+@test
+fn test_every_encode_refusal_renders()
+    let inner = PbUndeclaredField(path: "acme.Order", field: 9)
+    let all = [PbBadFieldNumber(field: 0), PbReservedFieldNumber(field: 19000),
+        PbBufferTooSmall(need: 3, left: 1), PbEncodeNotUtf8(field: 2, at: 1),
+        PbValueOutOfRange(field: 1, value: 0 - 1), PbEncodeDepthExceeded(limit: 100),
+        PbSchemaRefused(error: inner)]
+    for e in all
+        test.assert_eq(str.starts_with(e.message(), "protobuf: "), true)
+    test.assert_eq(PbSchemaRefused(error: inner).message(), inner.message())
+
+// ── codes and names ─────────────────────────────────────────────────
+
+@test
+fn test_every_wire_code_reads_back()
+    for code in 0..6
+        match pbwire.wire_of_code(code)
+            Some(w) => test.assert_eq(pbwire.wire_code(w), code)
+            None    => test.fail("${code} is a wire type")
+    test.assert_eq(pbwire.wire_of_code(0 - 1) == None, true)
+
+@test
+fn test_every_type_code_reads_back_with_its_keyword()
+    let names = ["double", "float", "int64", "uint64", "int32", "fixed64", "fixed32", "bool",
+        "string", "group", "message", "bytes", "uint32", "enum", "sfixed32", "sfixed64",
+        "sint32", "sint64"]
+    for code in 1..19
+        match pbwire.type_of_code(code)
+            Some(t) =>
+                test.assert_eq(pbwire.type_code(t), code)
+                test.assert_eq(pbwire.type_proto_name(t), names[code - 1])
+            None    => test.fail("${code} is a type")
+    test.assert_eq(pbwire.type_of_code(19) == None, true)
+
+@test
+fn test_every_type_travels_as_its_shape()
+    let shapes = [1, 5, 0, 0, 0, 1, 5, 0, 2, 3, 2, 2, 0, 0, 5, 1, 0, 0]
+    for code in 1..19
+        let t = pbwire.type_of_code(code) ?? PbTypeInt32
+        test.assert_eq(pbwire.wire_code(pbwire.wire_for(t)), shapes[code - 1])
+
+@test
+fn test_a_key_past_the_largest_field_number_is_not_a_tag()
+    test.assert_eq(pbwire.tag_of_key(536870912 * 8) == None, true)
+    test.assert_eq(pbwire.tag_of_key(15) == None, true)
+
+// ── reading a key ───────────────────────────────────────────────────
+
+@test
+fn test_a_key_that_is_not_there_is_truncation()
+    match pbwire.read_tag_at(bytes.zeros(0), 0)
+        Ok(_)  => test.fail("no byte, no key")
+        Err(e) => test.assert_eq(e == PbTruncated(at: 0, need: 1), true)
+    match pbwire.read_tag_at(hex("08"), 0 - 1)
+        Ok(_)  => test.fail("a negative offset is outside the buffer")
+        Err(e) => test.assert_eq(pberr.decode_offset(e), 0 - 1)
+
+@test
+fn test_a_bad_key_is_refused_by_what_is_wrong_with_it()
+    match pbwire.read_tag_at(hex("0e"), 0)
+        Ok(_)  => test.fail("wire type 6")
+        Err(e) => test.assert_eq(e == PbUnknownWireType(at: 0, wire: 6), true)
+    match pbwire.read_tag_at(hex("00"), 0)
+        Ok(_)  => test.fail("field 0")
+        Err(e) => test.assert_eq(e == PbZeroFieldNumber(at: 0), true)
+    // 2^29 << 3 = 2^32: five bytes, field 536870912.
+    match pbwire.read_tag_at(hex("8080808010"), 0)
+        Ok(_)  => test.fail("field 536870912")
+        Err(e) => test.assert_eq(e == PbFieldNumberTooLarge(at: 0, field: 536870912), true)
+    match pbwire.read_tag_at(hex("88ffffffffffffffffff"), 0)
+        Ok(_)  => test.fail("an overlong key")
+        Err(e) => test.assert_eq(e == PbVarintOverflow(at: 0, bytes: 10), true)
+
+@test
+fn test_a_varint_whose_tenth_byte_carries_more_than_one_bit_overflows()
+    // Ten bytes, the last one 0x02: bit 64 would be set.
+    let e = dec_err(pbwire.read_varint_at(hex("ffffffffffffffffff02"), 0))
+    test.assert_eq(e == PbVarintOverflow(at: 0, bytes: 10), true)
+    // An eleven-byte run that ends with the buffer.
+    let f = dec_err(pbwire.read_varint_at(hex("ffffffffffffffffffffff"), 0))
+    test.assert_eq(f == PbVarintOverflow(at: 0, bytes: 11), true)
+    // The largest value there is reads back as -1.
+    match pbwire.read_varint_at(hex("ffffffffffffffffff01"), 0)
+        Ok(v)  => test.assert_eq(v.value, 0 - 1)
+        Err(x) => test.fail(x.message())
+
+// ── writing a key and the scalars ───────────────────────────────────
+
+@test
+fn test_a_key_outside_the_range_is_refused_on_the_way_out()
+    var c = bytes.cursor_le(bytes.zeros(8))
+    test.assert_eq(enc_err(pbwire.write_tag_into(pbwire.tag(0, PbWireVarint), c)) == PbBadFieldNumber(field: 0), true)
+    test.assert_eq(enc_err(pbwire.write_tag_into(pbwire.tag(536870912, PbWireVarint), c)) == PbBadFieldNumber(field: 536870912), true)
+    var small = bytes.cursor_le(bytes.zeros(1))
+    test.assert_eq(enc_err(pbwire.write_tag_into(pbwire.tag(16, PbWireVarint), small)) == PbBufferTooSmall(need: 2, left: 1), true)
+
+@test
+fn test_a_value_outside_its_thirty_two_bit_range_is_refused()
+    var c = bytes.cursor_le(bytes.zeros(16))
+    test.assert_eq(enc_err(pbwire.write_int32_into(2147483648, c)) == PbValueOutOfRange(field: 0, value: 2147483648), true)
+    test.assert_eq(enc_err(pbwire.write_sint32_into(0 - 2147483649, c)) == PbValueOutOfRange(field: 0, value: 0 - 2147483649), true)
+    test.assert_eq(enc_err(pbwire.write_fixed32_into(4294967296, c)) == PbValueOutOfRange(field: 0, value: 4294967296), true)
+    test.assert_eq(c.pos(), 0)
+
+@test
+fn test_every_writer_refuses_a_buffer_too_small_before_writing()
+    var c = bytes.cursor_le(bytes.zeros(3))
+    test.assert_eq(enc_err(pbwire.write_varint_into(0 - 1, c)) == PbBufferTooSmall(need: 10, left: 3), true)
+    test.assert_eq(enc_err(pbwire.write_sint64_into(1 << 40, c)) == PbBufferTooSmall(need: 6, left: 3), true)
+    test.assert_eq(enc_err(pbwire.write_fixed32_into(1, c)) == PbBufferTooSmall(need: 4, left: 3), true)
+    test.assert_eq(enc_err(pbwire.write_fixed64_into(1, c)) == PbBufferTooSmall(need: 8, left: 3), true)
+    test.assert_eq(enc_err(pbwire.write_float_into(1.0, c)) == PbBufferTooSmall(need: 4, left: 3), true)
+    test.assert_eq(enc_err(pbwire.write_double_into(1.0, c)) == PbBufferTooSmall(need: 8, left: 3), true)
+    test.assert_eq(c.pos(), 0)
+
+@test
+fn test_the_fixed_widths_are_little_endian_whatever_the_cursor()
+    var c = bytes.cursor_be(bytes.zeros(12))
+    let _ = pbwire.write_fixed32_into(0 - 2, c)
+    let _ = pbwire.write_fixed64_into(0x0102030405060708, c)
+    test.assert_eq(bytes.to_hex(c.finish()), "feffffff0807060504030201")
+
+@test
+fn test_a_fixed_read_past_the_end_says_how_short_it_is()
+    test.assert_eq(dec_err(pbwire.read_fixed32_at(hex("0102"), 0)) == PbTruncated(at: 0, need: 2), true)
+    test.assert_eq(dec_err(pbwire.read_fixed64_at(hex("01"), 0 - 1)) == PbTruncated(at: 0 - 1, need: 8), true)
+    test.assert_eq(dec_err(pbwire.read_sint32_at(hex("80"), 0)) == PbTruncated(at: 0, need: 1), true)
+
+@test
+fn test_the_signed_readers_read_their_extremes()
+    match pbwire.read_sfixed32_at(hex("00000080"), 0)
+        Ok(v)  => test.assert_eq(v.value, 0 - 2147483648)
+        Err(e) => test.fail(e.message())
+    match pbwire.read_sfixed64_at(hex("ffffffffffffffff"), 0)
+        Ok(v)  => test.assert_eq(v.value, 0 - 1)
+        Err(e) => test.fail(e.message())
+    // int32 -1 as ten bytes, and as the five bytes some writers emit.
+    match pbwire.read_int32_at(hex("ffffffffffffffffff01"), 0)
+        Ok(v)  => test.assert_eq(v.value, 0 - 1)
+        Err(e) => test.fail(e.message())
+    match pbwire.read_int32_at(hex("ffffffff0f"), 0)
+        Ok(v)  => test.assert_eq(v.value, 0 - 1)
+        Err(e) => test.fail(e.message())
+    match pbwire.read_sint64_at(hex("ffffffffffffffffff01"), 0)
+        Ok(v)  => test.assert_eq(v.value, 0 - 9223372036854775807 - 1)
+        Err(e) => test.fail(e.message())
+
+// ── binary32 ────────────────────────────────────────────────────────
+
+@test
+fn test_binary32_rounds_to_nearest_and_ties_to_even()
+    test.assert_eq(pbwire.float32_bits(1.0), 0x3f800000)
+    test.assert_eq(pbwire.float32_bits(0.0 - 2.5), 0xc0200000)
+    test.assert_eq(pbwire.float32_bits(0.1), 0x3dcccccd)
+    // 1 + 2^-24 is halfway between 1 and the next binary32: ties to even.
+    test.assert_eq(pbwire.float32_bits(1.0000000596046448), 0x3f800000)
+    // 1 + 3 * 2^-24 is halfway too, and rounds up to the even neighbour.
+    test.assert_eq(pbwire.float32_bits(1.0000001788139343), 0x3f800002)
+    // Just below 2: rounds up across the exponent.
+    test.assert_eq(pbwire.float32_bits(1.99999999), 0x40000000)
+
+@test
+fn test_binary32_overflows_to_infinity_and_underflows_to_zero()
+    test.assert_eq(pbwire.float32_bits(1.0e39), 0x7f800000)
+    test.assert_eq(pbwire.float32_bits(0.0 - 1.0e39), 0xff800000)
+    // The largest binary32 rounds to itself; a hair above rounds up.
+    test.assert_eq(pbwire.float32_bits(3.4028234663852886e38), 0x7f7fffff)
+    test.assert_eq(pbwire.float32_bits(3.4028235677973366e38), 0x7f800000)
+    test.assert_eq(pbwire.float32_bits(1.0e-50), 0)
+    test.assert_eq(pbwire.float32_bits(0.0 - 1.0e-50), 0x80000000)
+    test.assert_eq(pbwire.float32_bits(float.from_bits(1)), 0)
+    test.assert_eq(pbwire.float32_bits(float.from_bits(1 << 63)), 0x80000000)
+
+@test
+fn test_binary32_keeps_subnormals_infinities_and_nans()
+    // 2^-149, the smallest subnormal, and 2^-126, the smallest normal.
+    test.assert_eq(pbwire.float32_bits(1.401298464324817e-45), 1)
+    test.assert_eq(pbwire.float32_bits(1.1754943508222875e-38), 0x00800000)
+    test.assert_eq(pbwire.float32_bits(1.0e-40), 0x000116c2)
+    let inf = float.from_bits(0x7ff0000000000000)
+    test.assert_eq(pbwire.float32_bits(inf), 0x7f800000)
+    test.assert_eq(pbwire.float32_bits(float.from_bits(0x7ff8000000000001)), 0x7fc00000)
+
+@test
+fn test_binary32_widens_exactly()
+    test.assert_eq(pbwire.float_of_bits32(0x3f800000), 1.0)
+    test.assert_eq(pbwire.float_of_bits32(0xc0200000), 0.0 - 2.5)
+    test.assert_eq(pbwire.float_of_bits32(1), 1.401298464324817e-45)
+    test.assert_eq(pbwire.float_of_bits32(0x00800000), 1.1754943508222875e-38)
+    test.assert_eq(float.to_bits(pbwire.float_of_bits32(0x80000000)), 1 << 63)
+    test.assert_eq(float.to_bits(pbwire.float_of_bits32(0x7f800000)), 0x7ff0000000000000)
+    test.assert_eq(float.to_bits(pbwire.float_of_bits32(0x7fc00000)), 0x7ff8000000000000)
+    for b in [1, 0x3dcccccd, 0x7f7fffff, 0x000116c2]
+        test.assert_eq(pbwire.float32_bits(pbwire.float_of_bits32(b)), b)
+
+// ── UTF-8 ───────────────────────────────────────────────────────────
+
+@test
+fn test_utf8_is_rfc_3629_s()
+    let ok = hex("61c3a9e282acf09f9880")
+    test.assert_eq(pbwire.first_non_utf8(ok, 0, bytes.len(ok)), 0 - 1)
+    // A lone continuation byte, an overlong two-byte form, a
+    // surrogate, a value above U+10FFFF, a sequence cut short, and an
+    // overlong three- and four-byte form.
+    for h in ["80", "c0af", "eda080", "f4908080", "e282", "e08080", "f0808080", "c3", "e2ffac"]
+        let b = hex(h)
+        test.assert_eq(pbwire.first_non_utf8(b, 0, bytes.len(b)), 0)
+    let b = hex("61e2")
+    test.assert_eq(pbwire.first_non_utf8(b, 0, 2), 1)
+    // Only the range counts.
+    test.assert_eq(pbwire.first_non_utf8(hex("ff61"), 1, 1), 0 - 1)
+
+// ── sizes ───────────────────────────────────────────────────────────
+
+@test
+fn test_a_group_field_counts_both_keys()
+    test.assert_eq(pbwire.field_len(pbwire.tag(1, PbWireStartGroup), 3), 5)
+    test.assert_eq(pbwire.field_len(pbwire.tag(1, PbWireVarint), 2), 3)
+    test.assert_eq(pbwire.fixed_width(PbWireVarint), 0 - 1)
+    test.assert_eq(pbwire.fixed_width(PbWireStartGroup), 0 - 1)
+
+@test
+fn test_every_non_scalar_type_is_not_packable()
+    test.assert_eq(pbwire.is_packable(PbTypeGroup), false)
+    test.assert_eq(pbwire.is_packable(PbTypeSfixed64), true)
+
+// ── packed payloads ─────────────────────────────────────────────────
+
+@test
+fn test_a_packed_payload_is_counted_or_refused()
+    let buf = hex("038e029ea705")
+    match pbwire.packed_element_count(buf, 0, 6, PbTypeInt32)
+        Ok(n)  => test.assert_eq(n, 3)
+        Err(e) => test.fail(e.message())
+    match pbwire.packed_element_count(hex("0000000000000000"), 0, 8, PbTypeDouble)
+        Ok(n)  => test.assert_eq(n, 1)
+        Err(e) => test.fail(e.message())
+    match pbwire.packed_element_count(buf, 0, 7, PbTypeInt32)
+        Ok(_)  => test.fail("seven bytes of six")
+        Err(e) => test.assert_eq(e == PbLengthOverrun(at: 0, len: 7, left: 6), true)
+    match pbwire.packed_element_count(buf, 0, 6, PbTypeString)
+        Ok(_)  => test.fail("strings are not packed")
+        Err(e) => test.assert_eq(e == PbPackedRemainder(at: 0, left: 6), true)
+    match pbwire.packed_element_count(buf, 0, 2, PbTypeInt32)
+        Ok(_)  => test.fail("the second varint is cut at the range's end")
+        Err(e) => test.assert_eq(e == PbPackedRemainder(at: 1, left: 1), true)
+    let long = hex("ffffffffffffffffffff01")
+    match pbwire.packed_element_count(long, 0, 11, PbTypeUint64)
+        Ok(_)  => test.fail("an eleven-byte varint")
+        Err(e) => test.assert_eq(e == PbVarintOverflow(at: 0, bytes: 11), true)
+    match pbwire.packed_element_count(hex("ff"), 0, 1, PbTypeInt32)
+        Ok(_)  => test.fail("the buffer ends inside the varint")
+        Err(e) => test.assert_eq(e == PbPackedRemainder(at: 0, left: 1), true)
+
+// ── skipping ────────────────────────────────────────────────────────
+
+@test
+fn test_every_shape_can_be_stepped_over()
+    let t = pbwire.tag(1, PbWireVarint)
+    match pbwire.skip_at(hex("9601"), 0, t)
+        Ok(n)  => test.assert_eq(n, 2)
+        Err(e) => test.fail(e.message())
+    match pbwire.skip_at(hex("0102030405060708"), 0, pbwire.tag(1, PbWireFixed64))
+        Ok(n)  => test.assert_eq(n, 8)
+        Err(e) => test.fail(e.message())
+    match pbwire.skip_at(hex("01020304"), 0, pbwire.tag(1, PbWireFixed32))
+        Ok(n)  => test.assert_eq(n, 4)
+        Err(e) => test.fail(e.message())
+    match pbwire.skip_at(hex("010203"), 0, pbwire.tag(1, PbWireFixed32))
+        Ok(_)  => test.fail("three bytes of four")
+        Err(e) => test.assert_eq(e == PbTruncated(at: 0, need: 1), true)
+    match pbwire.skip_at(hex(""), 0, pbwire.tag(1, PbWireEndGroup))
+        Ok(n)  => test.assert_eq(n, 0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_group_is_stepped_over_to_its_own_end_key()
+    // Group 1 holding field 1 = 150, group 2 holding field 3 = "a",
+    // and the fixed32 field 4, then the end of group 1.
+    let buf = hex("0b089601131a01611425010203040c")
+    match pbwire.skip_at(buf, 1, pbwire.tag(1, PbWireStartGroup))
+        Ok(n)  => test.assert_eq(n, bytes.len(buf) - 1)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_group_that_closes_wrong_or_never_is_refused()
+    match pbwire.skip_at(hex("0b089601"), 1, pbwire.tag(1, PbWireStartGroup))
+        Ok(_)  => test.fail("group 1 never closes")
+        Err(e) => test.assert_eq(e == PbUnclosedGroup(at: 4, field: 1), true)
+    match pbwire.skip_at(hex("0b14"), 1, pbwire.tag(1, PbWireStartGroup))
+        Ok(_)  => test.fail("group 2 closes group 1")
+        Err(e) => test.assert_eq(e == PbGroupMismatch(at: 1, closed: 2, open: 1), true)
+
+@test
+fn test_a_length_prefix_is_located_or_refused()
+    match pbwire.delimited_at(hex("0a0361"), 1)
+        Ok(_)  => test.fail("three bytes announced, one there")
+        Err(e) => test.assert_eq(e == PbLengthOverrun(at: 1, len: 3, left: 1), true)
+    match pbwire.delimited_at(hex("0affffffffffffffff80"), 1)
+        Ok(_)  => test.fail("the prefix is cut short")
+        Err(e) => test.assert_eq(e == PbTruncated(at: 1, need: 1), true)
+    match pbwire.delimited_at(hex("0affffffffffffffffff01"), 1)
+        Ok(_)  => test.fail("a length above 2^63")
+        Err(e) => test.assert_eq(e == PbLengthNotRepresentable(at: 1), true)

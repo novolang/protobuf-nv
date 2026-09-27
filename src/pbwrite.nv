@@ -118,12 +118,6 @@ fn check(field: Int, need: Int, dst: Cursor) -> Result<Unit, PbEncodeError>
 fn put_key(field: Int, w: PbWireType, var dst: Cursor) -> Result<Int, PbEncodeError>
     pbwire.write_tag_into(pbwire.tag(field, w), dst)
 
-// A range refusal carries the field number.
-fn with_field(r: Result<Int, PbEncodeError>, field: Int) -> Result<Int, PbEncodeError>
-    match r
-        Err(PbValueOutOfRange(_, v)) => Err(PbValueOutOfRange(field: field, value: v))
-        _                            => r
-
 // Write a varint field: `uint32`, `uint64`, `bool` as 0 or 1, or an
 // enum's number written as an `int64`.
 pub fn write_varint_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
@@ -236,7 +230,7 @@ pub fn write_packed_field(field: Int, t: PbFieldType, values: [Int],
     let k = put_key(field, PbWireBytes, dst)!
     let p = pbwire.write_varint_into(n, dst)!
     for v in values
-        let _ = with_field(write_element(t, v, dst), field)!
+        let _ = write_element(t, v, dst)!
     Ok(k + p + n)
 
 // Refuse an element its type cannot carry.

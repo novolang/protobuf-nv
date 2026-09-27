@@ -25,6 +25,7 @@
 use std.bytes
 use pbwire
 use pbunknown
+use pberr
 
 // What a reader will not do, whatever the input asks.
 //
@@ -127,8 +128,8 @@ enum PbScan
 // With `final` false, input that ends inside an item answers
 // `PbScanNeed`.  With `final` true the end of `buf` is the end of the
 // message, and it answers the refusal.
-fn scan(buf: Bytes, pos: Int, base: Int, final: Bool, limits: PbLimits,
-        groups: [Int]) -> Result<PbScan, PbDecodeError>
+fn scan(buf: Bytes, pos: Int, base: Int, final: Bool,
+        limits: PbLimits) -> Result<PbScan, PbDecodeError>
     let at = base + pos
     let k = match pbwire.read_tag_at(buf, pos)
         Ok(k)  => k
@@ -143,39 +144,21 @@ fn scan(buf: Bytes, pos: Int, base: Int, final: Bool, limits: PbLimits,
         PbWireFixed64    => fixed(buf, t, body, at, k.len, 8, final, base)
         PbWireFixed32    => fixed(buf, t, body, at, k.len, 4, final, base)
         PbWireBytes      => delimited(buf, t, body, at, k.len, final, base, limits)
-        PbWireStartGroup =>
-            if list.len(groups) >= limits.max_depth
-                return Err(PbDepthExceeded(at: at, limit: limits.max_depth))
-            Ok(PbScanEvent(ev: PbGroupStart(field: t.field, at: at), len: k.len))
-        PbWireEndGroup   =>
-            let open = list.last(groups) ?? 0
-            if open != t.field
-                return Err(PbGroupMismatch(at: at, closed: t.field, open: open))
-            Ok(PbScanEvent(ev: PbGroupEnd(field: t.field, at: at), len: k.len))
+        PbWireStartGroup => Ok(PbScanEvent(ev: PbGroupStart(field: t.field, at: at), len: k.len))
+        PbWireEndGroup   => Ok(PbScanEvent(ev: PbGroupEnd(field: t.field, at: at), len: k.len))
 
 fn field(t: PbTag, v: PbRaw, at: Int, len: Int) -> Result<PbScan, PbDecodeError>
     Ok(PbScanEvent(ev: PbFieldSeen(tag: t, value: v, at: at, raw_len: len), len: len))
 
-// A truncation becomes a wait unless the input is final; every other
-// refusal passes through with its offset moved into the message.
+// A truncation becomes a wait unless the input is final.  Every
+// refusal takes its offset in the message.
 fn need_or(e: PbDecodeError, final: Bool, base: Int) -> Result<PbScan, PbDecodeError>
     match e
-        PbTruncated(at, need) =>
-            if final
-                return Err(PbTruncated(at: at + base, need: need))
-            Ok(PbScanNeed(need: need))
-        _ => Err(moved(e, base))
-
-// The same refusal with its offset moved by `base`.
-fn moved(e: PbDecodeError, base: Int) -> PbDecodeError
-    match e
-        PbVarintOverflow(at, n)         => PbVarintOverflow(at: at + base, bytes: n)
-        PbUnknownWireType(at, w)        => PbUnknownWireType(at: at + base, wire: w)
-        PbZeroFieldNumber(at)           => PbZeroFieldNumber(at: at + base)
-        PbFieldNumberTooLarge(at, f)    => PbFieldNumberTooLarge(at: at + base, field: f)
-        PbLengthNotRepresentable(at)    => PbLengthNotRepresentable(at: at + base)
-        PbTruncated(at, need)           => PbTruncated(at: at + base, need: need)
-        _                               => e
+        PbTruncated(_, need) =>
+            if not final
+                return Ok(PbScanNeed(need: need))
+        _                    => ()
+    Err(pberr.shifted(e, base))
 
 fn fixed(buf: Bytes, t: PbTag, body: Int, at: Int, klen: Int, n: Int, final: Bool,
          base: Int) -> Result<PbScan, PbDecodeError>
@@ -212,29 +195,58 @@ fn delimited(buf: Bytes, t: PbTag, body: Int, at: Int, klen: Int, final: Bool, b
 struct PbRun
     var events: [PbEvent]
     used: Int
+    // The field numbers of the open groups, the outermost first.  Only
+    // the first `depth` entries are live.
     var groups: [Int]
+    depth: Int
     need: Int
 
 // Scan `buf` from its start, collecting events until the input runs
 // out or, with `final` false, stops inside a field.
-fn run(buf: Bytes, base: Int, final: Bool, limits: PbLimits,
-       groups: [Int]) -> Result<PbRun, PbDecodeError>
+fn run(buf: Bytes, base: Int, final: Bool, limits: PbLimits, groups: [Int],
+       depth: Int) -> Result<PbRun, PbDecodeError>
     var events: [PbEvent] = []
     var open = list.clone(groups)
+    var d = depth
     var pos = 0
     var need = 0
     let n = bytes.len(buf)
     while pos < n and need == 0
-        match scan(buf, pos, base, final, limits, open)!
+        match scan(buf, pos, base, final, limits)!
             PbScanNeed(k)       => need = k
             PbScanEvent(ev, len) =>
-                match ev
-                    PbGroupStart(f, _) => list.push(open, f)
-                    PbGroupEnd(_, _)   => open = list.slice(open, 0, list.len(open) - 1)
-                    _                  => ()
+                d = enter(open, d, ev, limits)!
                 list.push(events, ev)
                 pos = pos + len
-    Ok(PbRun { events: events, used: pos, groups: open, need: need })
+    Ok(PbRun { events: events, used: pos, groups: open, depth: d, need: need })
+
+// Track the group stack across one event, and answer the new depth.
+//
+// A group's start pushes its number, and its end pops it.
+// `PbDepthExceeded` past the depth limit, and `PbGroupMismatch` for an
+// end that does not close the innermost open group.
+fn enter(var open: [Int], depth: Int, ev: PbEvent, limits: PbLimits) -> Result<Int, PbDecodeError>
+    match ev
+        PbGroupStart(f, at)     =>
+            if depth >= limits.max_depth
+                return Err(PbDepthExceeded(at: at, limit: limits.max_depth))
+            if depth < list.len(open)
+                open[depth] = f
+            else
+                list.push(open, f)
+            Ok(depth + 1)
+        PbGroupEnd(f, at)       =>
+            let top = if depth > 0 then open[depth - 1] else 0
+            if top != f
+                return Err(PbGroupMismatch(at: at, closed: f, open: top))
+            Ok(depth - 1)
+        PbFieldSeen(_, _, _, _) => Ok(depth)
+
+// The innermost open group, or `None`.
+fn innermost(r: PbRun) -> ?Int
+    if r.depth == 0
+        return None
+    Some(r.groups[r.depth - 1])
 
 // Feed a chunk and take every field that finished.
 //
@@ -259,10 +271,10 @@ pub fn feed(r: PbReader, chunk: [u8]) -> Result<PbStep, PbDecodeError> []
     let total = r.offset + bytes.len(buf)
     if total > r.limits.max_message
         return Err(PbMessageTooLarge(at: r.offset, len: total, limit: r.limits.max_message))
-    let got = run(buf, r.offset, false, r.limits, r.groups)!
+    let got = run(buf, r.offset, false, r.limits, r.groups, r.depth)!
     let rest = bytes.slice(buf, got.used, bytes.len(buf))
     let next = PbReader { limits: r.limits, pending: rest, offset: r.offset + got.used,
-        depth: list.len(got.groups), groups: got.groups }
+        depth: got.depth, groups: got.groups }
     Ok(PbStep { reader: next, events: got.events, need: got.need })
 
 // Say that the message ends here.
@@ -272,11 +284,10 @@ pub fn feed(r: PbReader, chunk: [u8]) -> Result<PbStep, PbDecodeError> []
 // message that ends cleanly answers a step with no events and `need`
 // 0.
 pub fn finish(r: PbReader) -> Result<PbStep, PbDecodeError> []
-    let got = run(r.pending, r.offset, true, r.limits, r.groups)!
+    let got = run(r.pending, r.offset, true, r.limits, r.groups, r.depth)!
     let end = r.offset + got.used
-    match list.last(got.groups)
-        Some(f) => return Err(PbUnclosedGroup(at: end, field: f))
-        None    => ()
+    if let Some(f) = innermost(got)
+        return Err(PbUnclosedGroup(at: end, field: f))
     let next = PbReader { limits: r.limits, pending: bytes.zeros(0), offset: end,
         depth: 0, groups: [] }
     Ok(PbStep { reader: next, events: got.events, need: 0 })
@@ -323,10 +334,10 @@ fn walk_from(src: Bytes, base: Int, limits: PbLimits) -> Result<[PbEvent], PbDec
     let n = bytes.len(src)
     if n > limits.max_message
         return Err(PbMessageTooLarge(at: base, len: n, limit: limits.max_message))
-    let got = run(src, base, true, limits, [])!
-    match list.last(got.groups)
-        Some(f) => Err(PbUnclosedGroup(at: base + n, field: f))
-        None    => Ok(got.events)
+    let got = run(src, base, true, limits, [], 0)!
+    if let Some(f) = innermost(got)
+        return Err(PbUnclosedGroup(at: base + n, field: f))
+    Ok(got.events)
 
 // Every field of the `len` bytes at `off` in `src`, with offsets
 // counted in `src`.
