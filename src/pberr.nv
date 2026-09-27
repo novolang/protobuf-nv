@@ -114,22 +114,22 @@ impl Error for PbDecodeError
 // ```
 pub fn decode_offset(e: PbDecodeError) -> Int []
     match e
-        PbTruncated(at, _)              => at
-        PbVarintOverflow(at, _)         => at
-        PbUnknownWireType(at, _)        => at
-        PbZeroFieldNumber(at)           => at
-        PbFieldNumberTooLarge(at, _)    => at
-        PbLengthOverrun(at, _, _)       => at
-        PbLengthNotRepresentable(at)    => at
-        PbDepthExceeded(at, _)          => at
-        PbGroupMismatch(at, _, _)       => at
-        PbUnclosedGroup(at, _)          => at
-        PbNotUtf8(at, _)                => at
-        PbPackedRemainder(at, _)        => at
-        PbMessageTooLarge(at, _, _)     => at
-        PbTrailingBytes(at, _)          => at
-        PbNoSuchType(at, _)             => at
-        PbTransport(at, _)              => at
+        PbTruncated(at, _)           => at
+        PbVarintOverflow(at, _)      => at
+        PbUnknownWireType(at, _)     => at
+        PbZeroFieldNumber(at)        => at
+        PbFieldNumberTooLarge(at, _) => at
+        PbLengthOverrun(at, _, _)    => at
+        PbLengthNotRepresentable(at) => at
+        PbDepthExceeded(at, _)       => at
+        PbGroupMismatch(at, _, _)    => at
+        PbUnclosedGroup(at, _)       => at
+        PbNotUtf8(at, _)             => at
+        PbPackedRemainder(at, _)     => at
+        PbMessageTooLarge(at, _, _)  => at
+        PbTrailingBytes(at, _)       => at
+        PbNoSuchType(at, _)          => at
+        PbTransport(at, _)           => at
 
 // The same refusal with its offset moved `by` bytes later.
 //
@@ -210,18 +210,18 @@ impl Error for PbSchemaError
     // Answer which declaration is at fault and what is wrong with it.
     fn message(self) -> Str
         match self
-            PbUnresolvedTypeName(p, name)  => "protobuf: ${p} names ${name}, which the set does not declare"
-            PbDuplicateFieldNumber(p, f)   => "protobuf: ${p} declares number ${f} twice"
-            PbDuplicateName(p, name)       => "protobuf: ${p} declares the name ${name} twice"
-            PbOneofIndexOutOfRange(p, i)   => "protobuf: ${p} names oneof ${i}, which the message does not have"
-            PbBadMapEntry(p)               => "protobuf: ${p} is marked as a map entry and is not one"
-            PbBadMapKeyType(p, t)          => "protobuf: ${p} has the map key type ${t}, which is not allowed"
-            PbNotInProto3(p, what)         => "protobuf: ${p} uses ${what}, which proto3 does not have"
-            PbUnknownSyntax(p, s)          => "protobuf: ${p} declares the syntax \"${s}\""
-            PbReservedInSchema(p, f)       => "protobuf: ${p} uses the reserved field number or name of field ${f}"
-            PbUndeclaredField(p, f)        => "protobuf: ${p} does not declare field ${f}"
-            PbKindMismatch(p, want, got)   => "protobuf: ${p} holds a ${got} value where a ${want} value belongs"
-            PbNotGenerated(p, what)        => "protobuf: ${p} uses ${what}, which the generator does not produce"
+            PbUnresolvedTypeName(p, name) => "protobuf: ${p} names ${name}, which the set does not declare"
+            PbDuplicateFieldNumber(p, f)  => "protobuf: ${p} declares number ${f} twice"
+            PbDuplicateName(p, name)      => "protobuf: ${p} declares the name ${name} twice"
+            PbOneofIndexOutOfRange(p, i)  => "protobuf: ${p} names oneof ${i}, which the message does not have"
+            PbBadMapEntry(p)              => "protobuf: ${p} is marked as a map entry and is not one"
+            PbBadMapKeyType(p, t)         => "protobuf: ${p} has the map key type ${t}, which is not allowed"
+            PbNotInProto3(p, what)        => "protobuf: ${p} uses ${what}, which proto3 does not have"
+            PbUnknownSyntax(p, s)         => "protobuf: ${p} declares the syntax \"${s}\""
+            PbReservedInSchema(p, f)      => "protobuf: ${p} uses the reserved field number or name of field ${f}"
+            PbUndeclaredField(p, f)       => "protobuf: ${p} does not declare field ${f}"
+            PbKindMismatch(p, want, got)  => "protobuf: ${p} holds a ${got} value where a ${want} value belongs"
+            PbNotGenerated(p, what)       => "protobuf: ${p} uses ${what}, which the generator does not produce"
 
 // The dotted path a schema refusal names.
 //
@@ -234,18 +234,18 @@ impl Error for PbSchemaError
 // ```
 pub fn schema_path(e: PbSchemaError) -> Str []
     match e
-        PbUnresolvedTypeName(p, _)     => p
-        PbDuplicateFieldNumber(p, _)   => p
-        PbDuplicateName(p, _)          => p
-        PbOneofIndexOutOfRange(p, _)   => p
-        PbBadMapEntry(p)               => p
-        PbBadMapKeyType(p, _)          => p
-        PbNotInProto3(p, _)            => p
-        PbUnknownSyntax(p, _)          => p
-        PbReservedInSchema(p, _)       => p
-        PbUndeclaredField(p, _)        => p
-        PbKindMismatch(p, _, _)        => p
-        PbNotGenerated(p, _)           => p
+        PbUnresolvedTypeName(p, _)   => p
+        PbDuplicateFieldNumber(p, _) => p
+        PbDuplicateName(p, _)        => p
+        PbOneofIndexOutOfRange(p, _) => p
+        PbBadMapEntry(p)             => p
+        PbBadMapKeyType(p, _)        => p
+        PbNotInProto3(p, _)          => p
+        PbUnknownSyntax(p, _)        => p
+        PbReservedInSchema(p, _)     => p
+        PbUndeclaredField(p, _)      => p
+        PbKindMismatch(p, _, _)      => p
+        PbNotGenerated(p, _)         => p
 
 // PbEncodeError is why a message this package was asked to write would
 // not be legal protobuf.

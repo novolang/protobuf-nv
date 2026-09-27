@@ -113,8 +113,8 @@ pub fn decode(set: PbFileSet, full_name: Str, src: Bytes,
         return Err(PbMessageTooLarge(at: 0, len: n, limit: limits.max_message))
     decode_range(set, md, src, 0, n, limits, 0)
 
-fn decode_range(set: PbFileSet, md: PbMessage, src: Bytes, off: Int, len: Int,
-                limits: PbLimits, depth: Int) -> Result<PbDynamic, PbDecodeError>
+fn decode_range(set: PbFileSet, md: PbMessage, src: Bytes, off: Int, len: Int, limits: PbLimits,
+                depth: Int) -> Result<PbDynamic, PbDecodeError>
     if depth > limits.max_depth
         return Err(PbDepthExceeded(at: off, limit: limits.max_depth))
     let syntax = syntax_of(set, md.full_name)
@@ -131,8 +131,8 @@ fn decode_range(set: PbFileSet, md: PbMessage, src: Bytes, off: Int, len: Int,
 
 // Take one arrived group into `m`: decoded when its number is a group
 // field, kept whole when it is not.
-fn take_group(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m: PbDynamic, p: PbPiece,
-              src: Bytes, limits: PbLimits, depth: Int) -> Result<PbDynamic, PbDecodeError>
+fn take_group(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m: PbDynamic, p: PbPiece, src: Bytes,
+              limits: PbLimits, depth: Int) -> Result<PbDynamic, PbDecodeError>
     let f = p.tag.field
     let Some(fd) = pbdesc.field_by_number(md, f) else return Ok(keep(m, p.tag, bytes.slice(src, p.at, p.at + p.len)))
     if fd.field_type != PbTypeGroup
@@ -160,7 +160,9 @@ fn take(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m0: PbDynamic, t: PbTag
     Ok(store(set, md, syntax, m, fd, values))
 
 fn keep(m: PbDynamic, t: PbTag, raw: Bytes) -> PbDynamic
-    PbDynamic { type_name: m.type_name, fields: m.fields, unknown: pbunknown.keep(m.unknown, t, raw) }
+    PbDynamic { type_name: m.type_name,
+        fields: m.fields,
+        unknown: pbunknown.keep(m.unknown, t, raw) }
 
 // A scalar of a varint or fixed-width type, from its raw bits.
 fn scalar(set: PbFileSet, fd: PbField, v: PbRaw) -> PbValue
@@ -238,7 +240,8 @@ fn store(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m: PbDynamic, fd: PbFi
             if other.number != fd.number
                 out = clear(out, other.number)
     match (get(out, fd.number), v)
-        (Some(PbNested(a)), PbNested(b)) => return set_field(out, fd.number, PbNested(m: merge(a, b)))
+        (Some(PbNested(a)), PbNested(b)) =>
+            return set_field(out, fd.number, PbNested(m: merge(a, b)))
         _                                => ()
     if not pbdesc.has_presence(fd, syntax) and is_zero(v)
         return clear(out, fd.number)
@@ -269,13 +272,13 @@ fn default_of(set: PbFileSet, f: ?PbField) -> PbValue
 
 fn is_zero(v: PbValue) -> Bool
     match v
-        PbNum(n)         => n == 0
-        PbReal(x)        => float.to_bits(x) == 0
-        PbFlag(b)        => not b
-        PbText(s)        => s == ""
-        PbOctets(b)      => bytes.len(b) == 0
-        PbEnumOf(n, _)   => n == 0
-        _                => false
+        PbNum(n)       => n == 0
+        PbReal(x)      => float.to_bits(x) == 0
+        PbFlag(b)      => not b
+        PbText(s)      => s == ""
+        PbOctets(b)    => bytes.len(b) == 0
+        PbEnumOf(n, _) => n == 0
+        _              => false
 
 // ── writing ──────────────────────────────────────────────────────────
 
@@ -367,8 +370,14 @@ fn packed(md: PbMessage, fd: PbField, items: [PbValue]) -> Result<Bytes, PbEncod
     for it in items
         let w = want_of(t)
         let n = match it
-            PbReal(x) => if t == PbTypeFloat then pbwire.float32_bits(x) else float.to_bits(x)
-            PbFlag(b) => if b then 1 else 0
+            PbReal(x) => if t == PbTypeFloat
+                pbwire.float32_bits(x)
+            else
+                float.to_bits(x)
+            PbFlag(b) => if b
+                1
+            else
+                0
             _         => int_of(it) ?? 0
         if value_kind(it) != w and not (w == "enum" and value_kind(it) == "num")
             return mismatch(md, fd, w, it)
@@ -396,23 +405,23 @@ fn one_bytes(set: PbFileSet, md: PbMessage, fd: PbField, v: PbValue,
     let n = fd.number
     let t = fd.field_type
     match (t, v)
-        (PbTypeDouble, PbReal(x))   =>
+        (PbTypeDouble, PbReal(x))      =>
             var c = room(pbwrite.fixed_field_len(n, t))
             let _ = pbwrite.write_double_field(n, x, c)!
             Ok(c.finish())
-        (PbTypeFloat, PbReal(x))    =>
+        (PbTypeFloat, PbReal(x))       =>
             var c = room(pbwrite.fixed_field_len(n, t))
             let _ = pbwrite.write_float_field(n, x, c)!
             Ok(c.finish())
-        (PbTypeBool, PbFlag(b))     =>
+        (PbTypeBool, PbFlag(b))        =>
             var c = room(pbwrite.varint_field_len(n, 1))
             let _ = pbwrite.write_bool_field(n, b, c)!
             Ok(c.finish())
-        (PbTypeString, PbText(s))   =>
+        (PbTypeString, PbText(s))      =>
             var c = room(pbwrite.delimited_field_len(n, str.len(s)))
             let _ = pbwrite.write_string_field(n, s, c)!
             Ok(c.finish())
-        (PbTypeBytes, PbOctets(b))  => delimited(n, b)
+        (PbTypeBytes, PbOctets(b))     => delimited(n, b)
         (PbTypeMessage, PbNested(sub)) =>
             if sub.type_name != fd.type_name
                 return refused(PbKindMismatch(path: field_path(md, fd), want: fd.type_name, got: sub.type_name))
@@ -424,7 +433,7 @@ fn one_bytes(set: PbFileSet, md: PbMessage, fd: PbField, v: PbValue,
             var c = room(pbwire.field_len(pbwire.tag(n, PbWireStartGroup), bytes.len(body)))
             let _ = pbwrite.write_group_field(n, body, c)!
             Ok(c.finish())
-        _                           =>
+        _                              =>
             let w = want_of(t)
             let Some(x) = int_of(v) else return mismatch(md, fd, w, v)
             if w != "num" and w != "enum"
@@ -625,7 +634,7 @@ fn check_one(var errs: [PbSchemaError], set: PbFileSet, fp: Str, f: ?PbField, v:
     let Some(fd) = f else return
     let want = want_of(fd.field_type)
     let got = value_kind(v)
-    if got == want or (want == "enum" and got == "num")
+    if got == want or want == "enum" and got == "num"
         match v
             PbNested(sub) =>
                 if sub.type_name != fd.type_name
@@ -680,7 +689,7 @@ pub fn uint64_of_text(s: Str) -> ?Int []
         let d = str.byte_at_or(s, i, 0) - '0'
         if d < 0 or d > 9
             return None
-        if v < 0 or v > 1844674407370955161 or (v == 1844674407370955161 and d > 5)
+        if v < 0 or v > 1844674407370955161 or v == 1844674407370955161 and d > 5
             return None
         v = int.wrapping_add(int.wrapping_mul(v, 10), d)
     Some(v)

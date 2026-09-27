@@ -71,7 +71,8 @@ fn test_two_protobuf_names_that_fold_to_one_novo_name_are_refused()
     test.assert_eq(errs[0] == PbDuplicateName(path: "t.AB", name: "TAB"), true)
     let fields = msg(".t.F", [fld("loop", 1, PbLabelOptional, PbTypeInt32, ""),
         fld("loop_", 2, PbLabelOptional, PbTypeInt32, ""),
-        fld("unknown", 3, PbLabelOptional, PbTypeInt32, "")], [])
+        fld("unknown", 3, PbLabelOptional, PbTypeInt32, "")],
+        [])
     let more = pbgen.refusals(file("f.proto", PbProto3, [fields], []))
     test.assert_eq(more.len(), 2)
     test.assert_eq(more[1] == PbDuplicateName(path: "t.F", name: "unknown"), true)

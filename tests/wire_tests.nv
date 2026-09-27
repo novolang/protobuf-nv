@@ -151,17 +151,23 @@ fn test_a_varint_whose_tenth_byte_carries_more_than_one_bit_overflows()
 @test
 fn test_a_key_outside_the_range_is_refused_on_the_way_out()
     var c = bytes.cursor_le(bytes.zeros(8))
-    test.assert_eq(enc_err(pbwire.write_tag_into(pbwire.tag(0, PbWireVarint), c)) == PbBadFieldNumber(field: 0), true)
-    test.assert_eq(enc_err(pbwire.write_tag_into(pbwire.tag(536870912, PbWireVarint), c)) == PbBadFieldNumber(field: 536870912), true)
+    test.assert_eq(enc_err(pbwire.write_tag_into(pbwire.tag(0, PbWireVarint), c)) == PbBadFieldNumber(field: 0),
+        true)
+    test.assert_eq(enc_err(pbwire.write_tag_into(pbwire.tag(536870912, PbWireVarint), c)) == PbBadFieldNumber(field: 536870912),
+        true)
     var small = bytes.cursor_le(bytes.zeros(1))
-    test.assert_eq(enc_err(pbwire.write_tag_into(pbwire.tag(16, PbWireVarint), small)) == PbBufferTooSmall(need: 2, left: 1), true)
+    test.assert_eq(enc_err(pbwire.write_tag_into(pbwire.tag(16, PbWireVarint), small)) == PbBufferTooSmall(need: 2, left: 1),
+        true)
 
 @test
 fn test_a_value_outside_its_thirty_two_bit_range_is_refused()
     var c = bytes.cursor_le(bytes.zeros(16))
-    test.assert_eq(enc_err(pbwire.write_int32_into(2147483648, c)) == PbValueOutOfRange(field: 0, value: 2147483648), true)
-    test.assert_eq(enc_err(pbwire.write_sint32_into(0 - 2147483649, c)) == PbValueOutOfRange(field: 0, value: 0 - 2147483649), true)
-    test.assert_eq(enc_err(pbwire.write_fixed32_into(4294967296, c)) == PbValueOutOfRange(field: 0, value: 4294967296), true)
+    test.assert_eq(enc_err(pbwire.write_int32_into(2147483648, c)) == PbValueOutOfRange(field: 0, value: 2147483648),
+        true)
+    test.assert_eq(enc_err(pbwire.write_sint32_into(0 - 2147483649, c)) == PbValueOutOfRange(field: 0, value: 0 - 2147483649),
+        true)
+    test.assert_eq(enc_err(pbwire.write_fixed32_into(4294967296, c)) == PbValueOutOfRange(field: 0, value: 4294967296),
+        true)
     test.assert_eq(c.pos(), 0)
 
 @test

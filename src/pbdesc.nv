@@ -49,9 +49,9 @@ pub enum PbSyntax
 // The name a file's `syntax` statement carries.
 pub fn syntax_name(s: PbSyntax) -> Str []
     match s
-        PbProto2          => "proto2"
-        PbProto3          => "proto3"
-        PbSyntaxOther(n)  => n
+        PbProto2         => "proto2"
+        PbProto3         => "proto3"
+        PbSyntaxOther(n) => n
 
 // The syntax a name declares: `PbProto2` for `"proto2"`, `PbProto3`
 // for `"proto3"`, and `None` for anything else, `"editions"` included.
@@ -308,7 +308,10 @@ fn file_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<PbFile, P
             package = text(it.value)
         else if it.tag.field == 12
             syntax = text(it.value)
-    let scope = if package == "" then "" else ".${package}"
+    let scope = if package == ""
+        ""
+    else
+        ".${package}"
     var deps: [Str] = []
     var public: [Int] = []
     var messages: [PbMessage] = []
@@ -477,7 +480,10 @@ fn range_at(src: Bytes, off: Int, len: Int, exclusive: Bool,
             first = num(it.value)
         else if it.tag.field == 2
             end = num(it.value)
-    let last = if exclusive then end - 1 else end
+    let last = if exclusive
+        end - 1
+    else
+        end
     Ok(PbNumberRange { first: first, last: last })
 
 fn label_of(n: Int) -> PbLabel
@@ -530,9 +536,15 @@ fn field_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<PbField,
             jname = text(it.value)
         else if f == 17
             p3opt = flag(it.value)
-    let fallback = if type_name == "" then PbTypeInt32 else PbTypeMessage
+    let fallback = if type_name == ""
+        PbTypeInt32
+    else
+        PbTypeMessage
     let t = pbwire.type_of_code(code) ?? fallback
-    let j = if jname == "" then default_json_name(name) else jname
+    let j = if jname == ""
+        default_json_name(name)
+    else
+        jname
     Ok(PbField { name: name, json_name: j, number: number, label: label_of(label),
         field_type: t, type_name: type_name, extendee: extendee, oneof_index: oneof,
         packed_set: packed_set, packed_value: packed, proto3_optional: p3opt,
@@ -677,13 +689,15 @@ fn put_file(b0: PbBuilder, f: PbFile) -> Result<PbBuilder, PbEncodeError>
         b = pbwrite.put_varint(b, 10, p)!
     match f.syntax
         PbProto2         => ()
-        PbProto3         => b = pbwrite.put_string(b, 12, "proto3")!
-        PbSyntaxOther(n) => b = pbwrite.put_string(b, 12, n)!
+        PbProto3         =>
+            b = pbwrite.put_string(b, 12, "proto3")!
+        PbSyntaxOther(n) =>
+            b = pbwrite.put_string(b, 12, n)!
     Ok(b)
 
 // Write an options message under `field` when it holds anything.
-fn put_opts(b0: PbBuilder, field: Int, dep_field: Int, dep: Bool, special_field: Int,
-            special: Bool, u: PbUnknownSet) -> Result<PbBuilder, PbEncodeError>
+fn put_opts(b0: PbBuilder, field: Int, dep_field: Int, dep: Bool, special_field: Int, special: Bool,
+            u: PbUnknownSet) -> Result<PbBuilder, PbEncodeError>
     if not dep and not special and pbunknown.count(u) == 0
         return Ok(b0)
     var b = pbwrite.begin(b0, field)!
@@ -743,7 +757,7 @@ fn put_field(b0: PbBuilder, f: PbField) -> Result<PbBuilder, PbEncodeError>
     if f.packed_set or f.deprecated
         b = pbwrite.begin(b, 8)!
         if f.packed_set
-            b = pbwrite.put_varint(b, 2, if f.packed_value then 1 else 0)!
+            b = pbwrite.put_varint(b, 2, (if f.packed_value then 1 else 0))!
         b = put_flag(b, 3, f.deprecated)!
         b = pbwrite.end(b)!
     if f.oneof_index >= 0

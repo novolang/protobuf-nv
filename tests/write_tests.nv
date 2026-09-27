@@ -78,13 +78,20 @@ fn test_a_field_number_is_checked_before_the_room()
 @test
 fn test_a_value_its_type_cannot_carry_is_refused_with_its_field()
     var c = bytes.cursor_le(bytes.zeros(64))
-    test.assert_eq(refusal(pbwrite.write_sint32_field(3, 2147483648, c)) == PbValueOutOfRange(field: 3, value: 2147483648), true)
-    test.assert_eq(refusal(pbwrite.write_fixed32_field(4, 0 - 2147483649, c)) == PbValueOutOfRange(field: 4, value: 0 - 2147483649), true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(5, PbTypeString, [1], c)) == PbValueOutOfRange(field: 5, value: 9), true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeInt32, [2147483648], c)) == PbValueOutOfRange(field: 6, value: 2147483648), true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeUint32, [0 - 1], c)) == PbValueOutOfRange(field: 6, value: 0 - 1), true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeBool, [2], c)) == PbValueOutOfRange(field: 6, value: 2), true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeSfixed32, [0 - 2147483649], c)) == PbValueOutOfRange(field: 6, value: 0 - 2147483649), true)
+    test.assert_eq(refusal(pbwrite.write_sint32_field(3, 2147483648, c)) == PbValueOutOfRange(field: 3, value: 2147483648),
+        true)
+    test.assert_eq(refusal(pbwrite.write_fixed32_field(4, 0 - 2147483649, c)) == PbValueOutOfRange(field: 4, value: 0 - 2147483649),
+        true)
+    test.assert_eq(refusal(pbwrite.write_packed_field(5, PbTypeString, [1], c)) == PbValueOutOfRange(field: 5, value: 9),
+        true)
+    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeInt32, [2147483648], c)) == PbValueOutOfRange(field: 6, value: 2147483648),
+        true)
+    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeUint32, [0 - 1], c)) == PbValueOutOfRange(field: 6, value: 0 - 1),
+        true)
+    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeBool, [2], c)) == PbValueOutOfRange(field: 6, value: 2),
+        true)
+    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeSfixed32, [0 - 2147483649], c)) == PbValueOutOfRange(field: 6, value: 0 - 2147483649),
+        true)
     test.assert_eq(c.pos(), 0)
 
 @test
@@ -108,9 +115,12 @@ fn test_every_packable_type_writes_its_own_width()
 @test
 fn test_the_repeated_writers_check_the_room_for_every_element()
     var c = bytes.cursor_le(bytes.zeros(3))
-    test.assert_eq(refusal(pbwrite.write_repeated_varint_field(1, [1, 2], c)) == PbBufferTooSmall(need: 4, left: 3), true)
-    test.assert_eq(refusal(pbwrite.write_group_field(1, hex("0801"), c)) == PbBufferTooSmall(need: 4, left: 3), true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(1, PbTypeInt32, [1, 2], c)) == PbBufferTooSmall(need: 4, left: 3), true)
+    test.assert_eq(refusal(pbwrite.write_repeated_varint_field(1, [1, 2], c)) == PbBufferTooSmall(need: 4, left: 3),
+        true)
+    test.assert_eq(refusal(pbwrite.write_group_field(1, hex("0801"), c)) == PbBufferTooSmall(need: 4, left: 3),
+        true)
+    test.assert_eq(refusal(pbwrite.write_packed_field(1, PbTypeInt32, [1, 2], c)) == PbBufferTooSmall(need: 4, left: 3),
+        true)
 
 // ── the builder ─────────────────────────────────────────────────────
 
@@ -134,9 +144,12 @@ fn test_the_builder_refuses_a_level_past_its_size()
 @test
 fn test_the_builder_s_fixed_and_packed_puts_check_their_type()
     let b = pbwrite.builder(pbwrite.build_limits())
-    test.assert_eq(builder_refusal(pbwrite.put_fixed(b, 1, PbTypeInt32, 1)) == PbValueOutOfRange(field: 1, value: 5), true)
-    test.assert_eq(builder_refusal(pbwrite.put_fixed(b, 1, PbTypeFixed32, 0 - 1)) == PbValueOutOfRange(field: 1, value: 0 - 1), true)
-    test.assert_eq(builder_refusal(pbwrite.put_packed(b, 1, PbTypeBytes, [1])) == PbValueOutOfRange(field: 1, value: 12), true)
+    test.assert_eq(builder_refusal(pbwrite.put_fixed(b, 1, PbTypeInt32, 1)) == PbValueOutOfRange(field: 1, value: 5),
+        true)
+    test.assert_eq(builder_refusal(pbwrite.put_fixed(b, 1, PbTypeFixed32, 0 - 1)) == PbValueOutOfRange(field: 1, value: 0 - 1),
+        true)
+    test.assert_eq(builder_refusal(pbwrite.put_packed(b, 1, PbTypeBytes, [1])) == PbValueOutOfRange(field: 1, value: 12),
+        true)
     let f = built(pbwrite.put_fixed(b, 1, PbTypeDouble, float.to_bits(1.0)))
     match pbwrite.done(f)
         Ok(out) => test.assert_eq(bytes.to_hex(out), "09000000000000f03f")

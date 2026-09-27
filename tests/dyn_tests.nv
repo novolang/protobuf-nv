@@ -58,14 +58,17 @@ fn all_fields() -> [PbField]
 
 fn col() -> PbEnum
     PbEnum { name: "Col", full_name: ".d.Col", values: [PbEnumValue { name: "Z", number: 0,
-        deprecated: false }, PbEnumValue { name: "ONE", number: 1, deprecated: false }],
+        deprecated: false },
+        PbEnumValue { name: "ONE", number: 1, deprecated: false }],
         allow_alias: false, zero_value: "Z", deprecated: false, unknown: pbunknown.empty() }
 
 fn set_of(syntax: PbSyntax) -> PbFileSet
     let leaf = msg(".d.Leaf", [opt("a", 1, PbTypeInt32), fld("kid", 2, PbLabelOptional,
-        PbTypeMessage, ".d.Leaf")], false)
+        PbTypeMessage, ".d.Leaf")],
+        false)
     let dict = msg(".d.All.DictEntry", [opt("key", 1, PbTypeString),
-        fld("value", 2, PbLabelOptional, PbTypeMessage, ".d.Leaf")], true)
+        fld("value", 2, PbLabelOptional, PbTypeMessage, ".d.Leaf")],
+        true)
     let half = msg(".d.All.HalfEntry", [opt("key", 1, PbTypeInt64)], true)
     let all = msg(".d.All", all_fields(), false)
     let f = PbFile { name: "d.proto", package: "d", syntax: syntax, dependency: [],
@@ -281,7 +284,8 @@ fn test_every_default_a_map_entry_can_need()
     let want = ["real", "real", "flag", "text", "octets", "enum", "nested", "nested", "num"]
     for i in 0..list.len(kinds)
         let entry = msg(".q.M.VEntry", [opt("key", 1, PbTypeString),
-            fld("value", 2, PbLabelOptional, kinds[i], ".d.Col")], true)
+            fld("value", 2, PbLabelOptional, kinds[i], ".d.Col")],
+            true)
         let m = msg(".q.M", [fld("v", 1, PbLabelRepeated, PbTypeMessage, ".q.M.VEntry")], false)
         let set = PbFileSet { files: [PbFile { name: "q.proto", package: "q", syntax: PbProto3,
             dependency: [], public_dependency: [], messages: [m, entry], enums: [col()],
@@ -321,11 +325,15 @@ fn test_decode_refuses_an_unknown_type_a_large_message_and_deep_nesting()
     let small = PbLimits { max_depth: 100, max_message: 1, check_utf8: true }
     test.assert_eq(decode_err(p3(), hex("0801"), small) == PbMessageTooLarge(at: 0, len: 2, limit: 1), true)
     let shallow = PbLimits { max_depth: 1, max_message: 100, check_utf8: true }
-    test.assert_eq(decode_err(p3(), hex("7204" + "1202" + "0801"), shallow) == PbDepthExceeded(at: 4, limit: 1), true)
+    test.assert_eq(decode_err(p3(), hex("7204" + "1202" + "0801"), shallow) == PbDepthExceeded(at: 4, limit: 1),
+        true)
     // A field whose message type the set does not declare.
-    test.assert_eq(decode_err(p3(), hex("ba0100"), pbread.default_limits()) == PbNoSuchType(at: 3, name: ".d.Lost"), true)
-    test.assert_eq(decode_err(p3(), hex("c301c401"), pbread.default_limits()) == PbNoSuchType(at: 0, name: ".d.Lost"), true)
-    test.assert_eq(decode_err(p3(), hex("7a01"), pbread.default_limits()) == PbLengthOverrun(at: 1, len: 1, left: 0), true)
+    test.assert_eq(decode_err(p3(), hex("ba0100"), pbread.default_limits()) == PbNoSuchType(at: 3, name: ".d.Lost"),
+        true)
+    test.assert_eq(decode_err(p3(), hex("c301c401"), pbread.default_limits()) == PbNoSuchType(at: 0, name: ".d.Lost"),
+        true)
+    test.assert_eq(decode_err(p3(), hex("7a01"), pbread.default_limits()) == PbLengthOverrun(at: 1, len: 1, left: 0),
+        true)
 
 // ── encoding refusals ───────────────────────────────────────────────
 
@@ -369,8 +377,10 @@ fn test_encode_refuses_an_undeclared_field_and_type()
 @test
 fn test_encode_refuses_a_value_outside_its_range()
     test.assert_eq(encode_err(p3(), with(2, PbNum(v: 0 - 1))) == PbValueOutOfRange(field: 2, value: 0 - 1), true)
-    test.assert_eq(encode_err(p3(), with(1, PbNum(v: 1 << 40))) == PbValueOutOfRange(field: 1, value: 1 << 40), true)
-    test.assert_eq(encode_err(p3(), with(3, PbNum(v: 1 << 40))) == PbValueOutOfRange(field: 3, value: 1 << 40), true)
+    test.assert_eq(encode_err(p3(), with(1, PbNum(v: 1 << 40))) == PbValueOutOfRange(field: 1, value: 1 << 40),
+        true)
+    test.assert_eq(encode_err(p3(), with(3, PbNum(v: 1 << 40))) == PbValueOutOfRange(field: 3, value: 1 << 40),
+        true)
 
 @test
 fn test_encode_refuses_nesting_past_the_builder_s_depth()
@@ -459,9 +469,13 @@ fn test_lookups_that_find_nothing()
 fn test_merge_concatenates_lists_and_maps_and_merges_submessages()
     let e = PbMapEntry { key: PbText(v: "k"), value: PbNum(v: 1) }
     let a = pbdyn.set(pbdyn.set(pbdyn.set(with(15, PbList(items: [PbNum(v: 1)])), 16,
-        PbMap(entries: [e])), 14, PbNested(m: pbdyn.set(pbdyn.message(".d.Leaf"), 1, PbNum(v: 1)))), 1, PbNum(v: 1))
+        PbMap(entries: [e])),
+        14, PbNested(m: pbdyn.set(pbdyn.message(".d.Leaf"), 1, PbNum(v: 1)))),
+        1, PbNum(v: 1))
     let b = pbdyn.set(pbdyn.set(pbdyn.set(with(15, PbList(items: [PbNum(v: 2)])), 16,
-        PbMap(entries: [e])), 14, PbNested(m: pbdyn.set(pbdyn.message(".d.Leaf"), 2, PbNested(m: pbdyn.message(".d.Leaf"))))), 1, PbNum(v: 2))
+        PbMap(entries: [e])),
+        14, PbNested(m: pbdyn.set(pbdyn.message(".d.Leaf"), 2, PbNested(m: pbdyn.message(".d.Leaf"))))),
+        1, PbNum(v: 2))
     let m = pbdyn.merge(a, b)
     match pbdyn.get(m, 15)
         Some(PbList(xs)) => test.assert_eq(xs.len(), 2)

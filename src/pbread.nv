@@ -156,7 +156,8 @@ fn scan(buf: Bytes, pos: Int, base: Int, final: Bool,
     let at = base + pos
     let k = match pbwire.read_tag_at(buf, pos)
         Ok(k)  => k
-        Err(e) => return need_or(e, final, base)
+        Err(e) =>
+            return need_or(e, final, base)
     let body = pos + k.len
     let t = k.tag
     match t.wire
@@ -200,7 +201,8 @@ fn delimited(buf: Bytes, t: PbTag, body: Int, at: Int, klen: Int, final: Bool, b
              limits: PbLimits) -> Result<PbScan, PbDecodeError>
     let p = match pbwire.read_varint_at(buf, body)
         Ok(p)  => p
-        Err(e) => return need_or(e, final, base)
+        Err(e) =>
+            return need_or(e, final, base)
     if p.value < 0
         return Err(PbLengthNotRepresentable(at: base + body))
     let start = body + p.len
@@ -236,7 +238,8 @@ fn run(buf: Bytes, base: Int, final: Bool, limits: PbLimits, groups: [Int],
     let n = bytes.len(buf)
     while pos < n and need == 0
         match scan(buf, pos, base, final, limits)!
-            PbScanNeed(k)       => need = k
+            PbScanNeed(k)        =>
+                need = k
             PbScanEvent(ev, len) =>
                 d = enter(open, d, ev, limits)!
                 list.push(events, ev)
@@ -259,7 +262,10 @@ fn enter(var open: [Int], depth: Int, ev: PbEvent, limits: PbLimits) -> Result<I
                 list.push(open, f)
             Ok(depth + 1)
         PbGroupEnd(f, at)       =>
-            let top = if depth > 0 then open[depth - 1] else 0
+            let top = if depth > 0
+                open[depth - 1]
+            else
+                0
             if top != f
                 return Err(PbGroupMismatch(at: at, closed: f, open: top))
             Ok(depth - 1)
@@ -482,10 +488,14 @@ pub fn drain<S: Read[e]>(r: PbReader, src: S, limit: Int) -> Result<PbStep, PbDe
     var events: [PbEvent] = []
     var got = 0
     while got < limit
-        let want = if limit - got < 4096 then limit - got else 4096
+        let want = if limit - got < 4096
+            limit - got
+        else
+            4096
         let chunk = match src.read(want)
             Ok(c)  => c
-            Err(e) => return Err(PbTransport(at: cur.offset + pending_len(cur), cause: e))
+            Err(e) =>
+                return Err(PbTransport(at: cur.offset + pending_len(cur), cause: e))
         let n = bytes.len(chunk)
         if n == 0
             return Err(PbTruncated(at: cur.offset + pending_len(cur), need: limit - got))

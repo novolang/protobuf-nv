@@ -154,7 +154,7 @@ pub fn write_sint64_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, Pb
 // nothing else, so two encodings of the same message are the same
 // bytes.
 pub fn write_bool_field(field: Int, v: Bool, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    write_varint_field(field, if v then 1 else 0, dst)
+    write_varint_field(field, (if v then 1 else 0), dst)
 
 // Write a `fixed32` or `sfixed32` field: four little-endian bytes.
 // `PbValueOutOfRange` outside `-2^31 ..= 2^32 - 1`.

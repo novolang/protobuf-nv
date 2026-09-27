@@ -860,7 +860,7 @@ fn test_a_file_round_trips_through_its_own_bytes()
                             match pbdesc.parse_file(file, pbread.default_limits())
                                 Ok(f)  => test.assert_eq(f.package, "acme")
                                 Err(e) => test.fail(e.message())
-                        _ => test.fail("a descriptor set's first field is a file")
+                        _                                      => test.fail("a descriptor set's first field is a file")
                 Err(e)  => test.fail(e.message())
         Err(e)  => test.fail(e.message())
 

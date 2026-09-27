@@ -49,7 +49,8 @@ pub fn pieces(src: Bytes, limits: PbLimits) -> Result<[PbPiece], PbDecodeError> 
 // The top-level fields of the `len` bytes at `off` in `src`, with
 // offsets counted in `src`.  `PbLengthOverrun` when the range passes
 // the end of `src`.
-pub fn pieces_in(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<[PbPiece], PbDecodeError> []
+pub fn pieces_in(src: Bytes, off: Int, len: Int,
+                 limits: PbLimits) -> Result<[PbPiece], PbDecodeError> []
     let evs = pbread.walk_range(src, off, len, limits)!
     var out: [PbPiece] = []
     var depth = 0
@@ -199,7 +200,8 @@ pub fn int_len(field: Int, t: PbFieldType, v: Int) -> Int []
 // Write an integral field of type `t` holding `v`.
 //
 // `PbValueOutOfRange` for a value a thirty-two-bit type cannot carry.
-pub fn write_int(field: Int, t: PbFieldType, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_int(field: Int, t: PbFieldType, v: Int,
+                 var dst: Cursor) -> Result<Int, PbEncodeError> []
     match t
         PbTypeSint32   => pbwrite.write_sint32_field(field, v, dst)
         PbTypeSint64   => pbwrite.write_sint64_field(field, v, dst)
@@ -224,7 +226,8 @@ pub fn real_len(field: Int, t: PbFieldType) -> Int []
     pbwrite.fixed_field_len(field, t)
 
 // Write a `double` or `float` field.
-pub fn write_real(field: Int, t: PbFieldType, v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
+pub fn write_real(field: Int, t: PbFieldType, v: Float,
+                  var dst: Cursor) -> Result<Int, PbEncodeError> []
     if t == PbTypeFloat
         return pbwrite.write_float_field(field, v, dst)
     pbwrite.write_double_field(field, v, dst)
@@ -258,7 +261,7 @@ pub fn write_ints(field: Int, t: PbFieldType, vs: [Int], packed: Bool,
 fn real_bits(t: PbFieldType, vs: [Float]) -> [Int]
     var out: [Int] = []
     for v in vs
-        list.push(out, if t == PbTypeFloat then pbwire.float32_bits(v) else float.to_bits(v))
+        list.push(out, (if t == PbTypeFloat then pbwire.float32_bits(v) else float.to_bits(v)))
     out
 
 // How many bytes a repeated `double` or `float` field occupies.
@@ -284,7 +287,7 @@ pub fn write_reals(field: Int, t: PbFieldType, vs: [Float], packed: Bool,
 fn flag_bits(vs: [Bool]) -> [Int]
     var out: [Int] = []
     for v in vs
-        list.push(out, if v then 1 else 0)
+        list.push(out, (if v then 1 else 0))
     out
 
 // How many bytes a repeated `bool` field occupies.

@@ -361,8 +361,7 @@ pub fn novo_oneof_type_name(message_full_name: Str, oneof_name: Str) -> Str []
 // The generated variant name for one member of a oneof: the oneof's
 // type name and the member's name in upper camel case.  `.acme.Order`'s
 // `payment` member `card` becomes `AcmeOrderPaymentCard`.
-pub fn novo_oneof_variant_name(message_full_name: Str, oneof_name: Str,
-                               field_name: Str) -> Str []
+pub fn novo_oneof_variant_name(message_full_name: Str, oneof_name: Str, field_name: Str) -> Str []
     novo_oneof_type_name(message_full_name, oneof_name) + upper_camel(field_name)
 
 // The novo-lang type a scalar protobuf type generates as.
@@ -501,9 +500,15 @@ fn signature(var s: PbSrc, head: Str, params: [Str], ret: Str)
     var cur = open
     for i in 0..list.len(params)
         let last = i == list.len(params) - 1
-        let piece = if last then params[i] + ")" + ret else params[i] + ","
+        let piece = if last
+            params[i] + ")" + ret
+        else
+            params[i] + ","
         let first = i == 0
-        let joined = if first then cur + piece else cur + " " + piece
+        let joined = if first
+            cur + piece
+        else
+            cur + " " + piece
         if first or str.len(joined) <= 100
             cur = joined
         else
@@ -522,7 +527,10 @@ fn literal(var s: PbSrc, indent: Int, lead: Str, type_name: Str, fields: [Str])
     let n = list.len(fields)
     emit(s, indent, lead + type_name + " { " + fields[0] + ",")
     for i in 1..n
-        let tail = if i == n - 1 then " }" else ","
+        let tail = if i == n - 1
+            " }"
+        else
+            ","
         emit(s, indent + 4, fields[i] + tail)
 
 // Match arms with the arrows aligned, as `novo fmt` aligns them.
@@ -735,7 +743,7 @@ fn members(m: PbMessage, index: Int) -> [PbField]
 // The message's fields in field-number order.
 fn by_number(m: PbMessage) -> [PbField]
     var out: [PbField] = list.clone(m.fields)
-    list.sort_by(out, (f) => f.number)
+    list.sort_by(out, f => f.number)
     out
 
 fn gen_message(var s: PbSrc, c: PbCtx, m: PbMessage)
@@ -802,7 +810,10 @@ fn gen_len(var s: PbSrc, c: PbCtx, m: PbMessage, t: Str)
         let x = "m.${novo_field_name(f.name)}"
         let fam = family(f.field_type)
         let ft = type_const(f.field_type)
-        let packed = if pbdesc.packed_of(f, syntax) then "true" else "false"
+        let packed = if pbdesc.packed_of(f, syntax)
+            "true"
+        else
+            "false"
         match shape_of(c.set, m, f, syntax)
             PbPlain     =>
                 if m.map_entry
@@ -862,7 +873,10 @@ fn gen_write(var s: PbSrc, c: PbCtx, m: PbMessage, t: Str)
         let x = "m.${novo_field_name(f.name)}"
         let fam = family(f.field_type)
         let ft = type_const(f.field_type)
-        let packed = if pbdesc.packed_of(f, syntax) then "true" else "false"
+        let packed = if pbdesc.packed_of(f, syntax)
+            "true"
+        else
+            "false"
         match shape_of(c.set, m, f, syntax)
             PbPlain     =>
                 if m.map_entry
@@ -931,7 +945,10 @@ fn gen_decode(var s: PbSrc, c: PbCtx, m: PbMessage, t: Str)
         emit(s, 8, "let f = p.tag.field")
     var first = true
     for f in by_number(m)
-        let kw = if first then "if" else "else if"
+        let kw = if first
+            "if"
+        else
+            "else if"
         first = false
         emit(s, 8, "${kw} f == ${f.number}")
         gen_take(s, c, m, f, syntax)
@@ -940,7 +957,9 @@ fn gen_decode(var s: PbSrc, c: PbCtx, m: PbMessage, t: Str)
     for f in merged
         let x = "m.${novo_field_name(f.name)}"
         emit(s, 4, "if let Some(b) = raw_${f.number}")
-        emit(s, 8, "let sub = ${call(c, f.type_name, decode_fn_name(f.type_name))}(b, pbcodec.nested(limits, 0)!)!")
+        emit(s,
+            8,
+            "let sub = ${call(c, f.type_name, decode_fn_name(f.type_name))}(b, pbcodec.nested(limits, 0)!)!")
         emit(s, 8, "${x} = Some(sub)")
     emit(s, 4, "Ok(m)")
 
@@ -949,17 +968,29 @@ fn gen_take(var s: PbSrc, c: PbCtx, m: PbMessage, f: PbField, syntax: PbSyntax)
     let x = "m.${novo_field_name(f.name)}"
     let fam = family(f.field_type)
     let ft = type_const(f.field_type)
-    let done = if m.map_entry then "" else "continue"
+    let done = if m.map_entry
+        ""
+    else
+        "continue"
     let shape = shape_of(c.set, m, f, syntax)
     if shape == PbRepeated and (fam == "int" or fam == "real" or fam == "flag")
-        let e = if fam == "int" then "pbcodec.ints_of(p, ${ft})!" else if fam == "real" then "pbcodec.reals_of(p, ${ft})!" else "pbcodec.flags_of(p)!"
+        let e = if fam == "int"
+            "pbcodec.ints_of(p, ${ft})!"
+        else
+            if fam == "real"
+                "pbcodec.reals_of(p, ${ft})!"
+            else
+                "pbcodec.flags_of(p)!"
         emit(s, 12, "if let Some(vs) = ${e}")
         emit(s, 16, "list.append(${x}, vs)")
         if done != ""
             emit(s, 16, done)
         return
     emit(s, 12, "if let Some(v) = ${read_expr(f)}")
-    let value = if fam == "octets" then "bytes.clone(v)" else "v"
+    let value = if fam == "octets"
+        "bytes.clone(v)"
+    else
+        "v"
     match shape
         PbPlain     => emit(s, 16, "${x} = ${value}")
         PbOptional  =>

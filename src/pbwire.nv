@@ -383,7 +383,7 @@ fn check_room(need: Int, dst: Cursor) -> Result<Unit, PbEncodeError>
 fn byte(src: Bytes, i: Int) -> Int
     if i < 0
         return 0 - 1
-    bytes.byte_at(src, i) ?? (0 - 1)
+    bytes.byte_at(src, i) ?? 0 - 1
 
 // ── the scalar codings ───────────────────────────────────────────────
 
@@ -526,7 +526,10 @@ pub fn read_sint64_at(src: Bytes, off: Int) -> Result<PbIntAt, PbDecodeError> []
 fn get_le(src: Bytes, off: Int, n: Int) -> Result<Int, PbDecodeError>
     let have = bytes.len(src) - off
     if off < 0 or have < n
-        let short = if off < 0 then n else n - have
+        let short = if off < 0
+            n
+        else
+            n - have
         return Err(PbTruncated(at: off, need: short))
     var v = 0
     for i in 0..n
@@ -595,7 +598,7 @@ pub fn float32_bits(v: Float) -> Int []
         return sign | 0x7f800000
     if e >= 0 - 126
         let q = round_shift(m, 29)
-        if q == 1 << 24
+        if q == (1 << 24)
             if e + 1 > 127
                 return sign | 0x7f800000
             return sign | ((e + 128) << 23)
@@ -610,7 +613,7 @@ fn round_shift(m: Int, shift: Int) -> Int
     let q = m >>> shift
     let rem = m & ((1 << shift) - 1)
     let half = 1 << (shift - 1)
-    if rem > half or (rem == half and (q & 1) == 1)
+    if rem > half or rem == half and (q & 1) == 1
         return q + 1
     q
 
@@ -849,11 +852,11 @@ pub fn skip_at(src: Bytes, off: Int, t: PbTag) -> Result<Int, PbDecodeError> []
 // The payload length of a field of any shape but a group start.
 fn skip_flat(src: Bytes, off: Int, w: PbWireType) -> Result<Int, PbDecodeError>
     match w
-        PbWireVarint   => Ok(read_varint_at(src, off)!.len)
-        PbWireFixed64  => fixed_skip(src, off, 8)
-        PbWireFixed32  => fixed_skip(src, off, 4)
-        PbWireBytes    => Ok(delimited_at(src, off)!.len)
-        _              => Ok(0)
+        PbWireVarint  => Ok(read_varint_at(src, off)!.len)
+        PbWireFixed64 => fixed_skip(src, off, 8)
+        PbWireFixed32 => fixed_skip(src, off, 4)
+        PbWireBytes   => Ok(delimited_at(src, off)!.len)
+        _             => Ok(0)
 
 fn fixed_skip(src: Bytes, off: Int, n: Int) -> Result<Int, PbDecodeError>
     let have = bytes.len(src) - off

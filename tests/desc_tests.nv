@@ -258,7 +258,8 @@ fn test_proto3_refuses_what_only_proto2_has()
     let m = msg(".t.M", [fld("g", 1, PbLabelOptional, PbTypeGroup, ".t.G"),
         fld("r", 2, PbLabelRequired, PbTypeInt32, ""), dflt])
     let e = PbEnum { name: "E", full_name: ".t.E", values: [PbEnumValue { name: "ONE", number: 1,
-        deprecated: false }], allow_alias: false, zero_value: "", deprecated: false,
+        deprecated: false }],
+        allow_alias: false, zero_value: "", deprecated: false,
         unknown: pbunknown.empty() }
     let errs = findings(file("p.proto", PbProto3, [m, g], [e]))
     test.assert_eq(errs.len(), 4)
@@ -271,7 +272,8 @@ fn test_proto3_refuses_what_only_proto2_has()
 @test
 fn test_a_map_entry_must_be_one()
     let bad_shape = PbMessage { name: "E", full_name: ".t.E", fields: [fld("key", 1, PbLabelOptional,
-        PbTypeString, "")], oneofs: [], nested: [], enums: [], extensions: [],
+        PbTypeString, "")],
+        oneofs: [], nested: [], enums: [], extensions: [],
         extension_ranges: [], reserved_ranges: [], reserved_names: [], map_entry: true,
         deprecated: false, unknown: pbunknown.empty() }
     let bad_key = PbMessage { name: "F", full_name: ".t.F", fields: [
