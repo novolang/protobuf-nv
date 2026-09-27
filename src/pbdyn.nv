@@ -29,6 +29,7 @@ use pbunknown
 use pbwrite
 use pbdesc
 use pberr
+use pbcodec
 
 // One value of one field, typed by the descriptor.
 pub enum PbValue
@@ -117,61 +118,30 @@ fn decode_range(set: PbFileSet, md: PbMessage, src: Bytes, off: Int, len: Int,
     if depth > limits.max_depth
         return Err(PbDepthExceeded(at: off, limit: limits.max_depth))
     let syntax = syntax_of(set, md.full_name)
-    let evs = pbread.walk_range(src, off, len, limits)!
     var m = message(md.full_name)
-    var i = 0
-    while i < list.len(evs)
-        match evs[i]
-            PbFieldSeen(t, v, at, raw_len) =>
-                let raw = bytes.slice(src, at, at + raw_len)
-                let start = at + raw_len - payload_len(v)
-                m = take(set, md, syntax, m, t, v, raw, start, limits, depth)!
-                i = i + 1
-            PbGroupStart(f, at)            =>
-                let (j, end_at) = group_end(evs, i)
-                let key = pbwire.key_len(pbwire.tag(f, PbWireStartGroup))
-                let close = end_at + pbwire.key_len(pbwire.tag(f, PbWireEndGroup))
-                let t = pbwire.tag(f, PbWireStartGroup)
-                match pbdesc.field_by_number(md, f)
-                    Some(fd) if fd.field_type == PbTypeGroup =>
-                        let sub = group_type(set, fd, at)!
-                        let g = decode_range(set, sub, src, at + key, end_at - at - key, limits, depth + 1)!
-                        m = store(set, md, syntax, m, fd, [PbNested(m: g)])
-                    _ =>
-                        m = keep(m, t, bytes.slice(src, at, close))
-                i = j + 1
-            PbGroupEnd(_, _)               => i = i + 1
+    for p in pbcodec.pieces_in(src, off, len, limits)!
+        let t = p.tag
+        let raw = bytes.slice(src, p.at, p.at + p.len)
+        if t.wire == PbWireStartGroup
+            m = take_group(set, md, syntax, m, p, src, limits, depth)!
+        else
+            let start = p.at + p.len - bytes.len(pbread.data_of(p.value))
+            m = take(set, md, syntax, m, t, p.value, raw, start, limits, depth)!
     Ok(m)
 
-fn group_type(set: PbFileSet, fd: PbField, at: Int) -> Result<PbMessage, PbDecodeError>
-    let Some(sub) = pbdesc.find_message(set, fd.type_name) else return Err(PbNoSuchType(at: at, name: fd.type_name))
-    Ok(sub)
-
-fn payload_len(v: PbRaw) -> Int
-    match v
-        PbRawBytes(d) => bytes.len(d)
-        _             => 0
-
-// The index of the event that closes the group opened at `i`, and the
-// offset of its end key.  `pbread.walk` answers only balanced groups,
-// so the end is always there.
-fn group_end(evs: [PbEvent], i: Int) -> (Int, Int)
-    var depth = 0
-    var j = i
-    var at = 0
-    var found = false
-    while not found
-        match evs[j]
-            PbGroupStart(_, _)       => depth = depth + 1
-            PbGroupEnd(_, a)         =>
-                depth = depth - 1
-                if depth == 0
-                    found = true
-                    at = a
-            PbFieldSeen(_, _, _, _)  => ()
-        if not found
-            j = j + 1
-    (j, at)
+// Take one arrived group into `m`: decoded when its number is a group
+// field, kept whole when it is not.
+fn take_group(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m: PbDynamic, p: PbPiece,
+              src: Bytes, limits: PbLimits, depth: Int) -> Result<PbDynamic, PbDecodeError>
+    let f = p.tag.field
+    let Some(fd) = pbdesc.field_by_number(md, f) else return Ok(keep(m, p.tag, bytes.slice(src, p.at, p.at + p.len)))
+    if fd.field_type != PbTypeGroup
+        return Ok(keep(m, p.tag, bytes.slice(src, p.at, p.at + p.len)))
+    let Some(sub) = pbdesc.find_message(set, fd.type_name) else return Err(PbNoSuchType(at: p.at, name: fd.type_name))
+    let open = pbwire.key_len(pbwire.tag(f, PbWireStartGroup))
+    let close = pbwire.key_len(pbwire.tag(f, PbWireEndGroup))
+    let g = decode_range(set, sub, src, p.at + open, p.len - open - close, limits, depth + 1)!
+    Ok(store(set, md, syntax, m, fd, [PbNested(m: g)]))
 
 // Take one arrived field into `m`.
 fn take(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m0: PbDynamic, t: PbTag, v: PbRaw,

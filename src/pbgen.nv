@@ -672,29 +672,12 @@ fn family(t: PbFieldType) -> Str
         PbTypeString  => "text"
         PbTypeBytes   => "octets"
         PbTypeMessage => "message"
-        PbTypeGroup   => "message"
         _             => "int"
 
+// The name of a field type's variant, as generated code spells it:
+// `PbTypeSint32`.
 fn type_const(t: PbFieldType) -> Str
-    match t
-        PbTypeDouble   => "PbTypeDouble"
-        PbTypeFloat    => "PbTypeFloat"
-        PbTypeInt64    => "PbTypeInt64"
-        PbTypeUint64   => "PbTypeUint64"
-        PbTypeInt32    => "PbTypeInt32"
-        PbTypeFixed64  => "PbTypeFixed64"
-        PbTypeFixed32  => "PbTypeFixed32"
-        PbTypeBool     => "PbTypeBool"
-        PbTypeString   => "PbTypeString"
-        PbTypeGroup    => "PbTypeGroup"
-        PbTypeMessage  => "PbTypeMessage"
-        PbTypeBytes    => "PbTypeBytes"
-        PbTypeUint32   => "PbTypeUint32"
-        PbTypeEnum     => "PbTypeEnum"
-        PbTypeSfixed32 => "PbTypeSfixed32"
-        PbTypeSfixed64 => "PbTypeSfixed64"
-        PbTypeSint32   => "PbTypeSint32"
-        PbTypeSint64   => "PbTypeSint64"
+    "PbType" + upper_camel(pbwire.type_proto_name(t))
 
 // The default a field of this family holds when nothing arrived.
 fn zero_of(t: PbFieldType) -> Str

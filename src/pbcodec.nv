@@ -44,7 +44,13 @@ pub struct PbPiece
 //         Err(e) => println(e.message())
 // ```
 pub fn pieces(src: Bytes, limits: PbLimits) -> Result<[PbPiece], PbDecodeError> []
-    let evs = pbread.walk(src, limits)!
+    pieces_in(src, 0, bytes.len(src), limits)
+
+// The top-level fields of the `len` bytes at `off` in `src`, with
+// offsets counted in `src`.  `PbLengthOverrun` when the range passes
+// the end of `src`.
+pub fn pieces_in(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<[PbPiece], PbDecodeError> []
+    let evs = pbread.walk_range(src, off, len, limits)!
     var out: [PbPiece] = []
     var depth = 0
     var start = 0

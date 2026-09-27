@@ -1,0 +1,217 @@
+// tests/codec_tests.nv — the calls generated code makes: pieces, the
+// typed readers and the typed writers.
+//
+// tools/roundtrip.py checks the same calls from generated code against
+// Google's protobuf module; this suite reaches every branch directly.
+
+use std.test
+use std.bytes
+use pbwire
+use pbread
+use pbunknown
+use pbcodec
+
+fn hex(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+// The elements of a repeated reader's answer, or one sentinel.
+fn ints(r: Result<?[Int], PbDecodeError>) -> readonly [Int]
+    match r
+        Ok(Some(xs)) => xs
+        Ok(None)     => [7777]
+        Err(e)       =>
+            test.fail(e.message())
+            []
+
+fn reals(r: Result<?[Float], PbDecodeError>) -> readonly [Float]
+    match r
+        Ok(Some(xs)) => xs
+        Ok(None)     => [7777.0]
+        Err(e)       =>
+            test.fail(e.message())
+            []
+
+fn flags(r: Result<?[Bool], PbDecodeError>) -> Str
+    match r
+        Ok(Some(xs)) => "${xs}"
+        Ok(None)     => "none"
+        Err(e)       => e.message()
+
+fn piece(h: Str) -> PbPiece
+    let none = PbPiece { tag: pbwire.tag(1, PbWireVarint), value: PbRawVarint(bits: 0), at: 0, len: 0 }
+    let Ok(ps) = pbcodec.pieces(hex(h), pbread.default_limits()) else return none
+    let p = list.first(ps) ?? none
+    p
+
+@test
+fn test_pieces_take_a_group_whole_and_keep_moves_bytes()
+    let src = hex("0801" + "0b080113140c" + "1001")
+    match pbcodec.pieces(src, pbread.default_limits())
+        Ok(ps) =>
+            test.assert_eq(ps.len(), 3)
+            test.assert_eq(ps[1].len, 6)
+            let u = pbcodec.keep(pbunknown.empty(), src, ps[1])
+            test.assert_eq(bytes.to_hex(pbunknown.fields_of(u)[0].raw), "0b080113140c")
+        Err(e) => test.fail(e.message())
+    match pbcodec.pieces_in(src, 8, 2, pbread.default_limits())
+        Ok(ps) => test.assert_eq(ps[0].at, 8)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_nested_limits_count_down_to_a_refusal()
+    let l = PbLimits { max_depth: 1, max_message: 10, check_utf8: false }
+    match pbcodec.nested(l, 3)
+        Ok(n)  =>
+            test.assert_eq(n.max_depth, 0)
+            match pbcodec.nested(n, 4)
+                Ok(_)  => test.fail("no depth is left")
+                Err(e) => test.assert_eq(e == PbDepthExceeded(at: 4, limit: 0), true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_int_of_reads_each_type_back_to_its_value()
+    let v = piece("08ffffffffffffffffff01")
+    test.assert_eq((pbcodec.int_of(v, PbTypeInt32) ?? 7777) == 0 - 1, true)
+    test.assert_eq((pbcodec.int_of(v, PbTypeEnum) ?? 7777) == 0 - 1, true)
+    test.assert_eq((pbcodec.int_of(v, PbTypeUint32) ?? 7777) == 4294967295, true)
+    test.assert_eq((pbcodec.int_of(v, PbTypeUint64) ?? 7777) == 0 - 1, true)
+    test.assert_eq((pbcodec.int_of(v, PbTypeSint64) ?? 7777) == 0 - 9223372036854775807 - 1, true)
+    test.assert_eq((pbcodec.int_of(piece("0803"), PbTypeSint32) ?? 7777) == 0 - 2, true)
+    test.assert_eq((pbcodec.int_of(piece("0dffffffff"), PbTypeSfixed32) ?? 7777) == 0 - 1, true)
+    test.assert_eq((pbcodec.int_of(piece("0dffffffff"), PbTypeFixed32) ?? 7777) == 4294967295, true)
+    test.assert_eq(pbcodec.int_of(v, PbTypeFixed32) == None, true)
+
+@test
+fn test_the_other_scalar_readers_answer_none_on_a_wire_mismatch()
+    test.assert_eq(pbcodec.real_of(piece("0d0000803f"), PbTypeFloat) ?? 0.0, 1.0)
+    test.assert_eq(pbcodec.real_of(piece("09000000000000f03f"), PbTypeDouble) ?? 0.0, 1.0)
+    test.assert_eq(pbcodec.real_of(piece("0801"), PbTypeDouble) == None, true)
+    test.assert_eq(pbcodec.flag_of(piece("0802")) ?? false, true)
+    test.assert_eq(pbcodec.flag_of(piece("0a00")) == None, true)
+    test.assert_eq(pbcodec.octets_of(piece("0801")) == None, true)
+    match pbcodec.octets_of(piece("0a01ff"))
+        Some(b) => test.assert_eq(bytes.to_hex(b), "ff")
+        None    => test.fail("a length-delimited piece")
+
+@test
+fn test_text_is_checked_for_utf8_when_the_limits_say_so()
+    let strict = pbread.default_limits()
+    let loose = PbLimits { max_depth: 1, max_message: 100, check_utf8: false }
+    match pbcodec.text_of(piece("0801"), strict)
+        Ok(t)  => test.assert_eq(t == None, true)
+        Err(e) => test.fail(e.message())
+    match pbcodec.text_of(piece("0a0261ff"), strict)
+        Ok(_)  => test.fail("0xff is not UTF-8")
+        Err(e) => test.assert_eq(e == PbNotUtf8(at: 3, byte: 255), true)
+    match pbcodec.text_of(piece("0a0261ff"), loose)
+        Ok(t)  => test.assert_eq(t != None, true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_repeated_readers_take_packed_and_single_elements()
+    test.assert_eq(ints(pbcodec.ints_of(piece("0a020301"), PbTypeSint32)), [0 - 2, 0 - 1])
+    test.assert_eq(ints(pbcodec.ints_of(piece("0803"), PbTypeInt32)), [3])
+    test.assert_eq(ints(pbcodec.ints_of(piece("0d01000000"), PbTypeInt32)), [7777])
+    test.assert_eq(reals(pbcodec.reals_of(piece("0a080000803f00000040"), PbTypeFloat)), [1.0, 2.0])
+    test.assert_eq(reals(pbcodec.reals_of(piece("09000000000000f03f"), PbTypeDouble)), [1.0])
+    test.assert_eq(reals(pbcodec.reals_of(piece("0801"), PbTypeDouble)), [7777.0])
+    test.assert_eq(flags(pbcodec.flags_of(piece("0a020100"))), "[true, false]")
+    test.assert_eq(flags(pbcodec.flags_of(piece("0801"))), "[true]")
+    test.assert_eq(flags(pbcodec.flags_of(piece("0d01000000"))), "none")
+    match pbcodec.ints_of(piece("0a0180"), PbTypeInt32)
+        Ok(_)  => test.fail("the packed varint is cut short")
+        Err(e) => test.assert_eq(e == PbPackedRemainder(at: 0, left: 1), true)
+
+// ── sizing and writing ──────────────────────────────────────────────
+
+fn int_hex(t: PbFieldType, v: Int) -> Str
+    let n = pbcodec.int_len(1, t, v)
+    var c = bytes.cursor_le(bytes.zeros(n))
+    match pbcodec.write_int(1, t, v, c)
+        Ok(k)  => test.assert_eq(k, n)
+        Err(e) => test.fail(e.message())
+    bytes.to_hex(c.finish())
+
+@test
+fn test_every_integral_type_sizes_and_writes_alike()
+    test.assert_eq(int_hex(PbTypeInt32, 0 - 1), "08ffffffffffffffffff01")
+    test.assert_eq(int_hex(PbTypeEnum, 1), "0801")
+    test.assert_eq(int_hex(PbTypeSint32, 0 - 1), "0801")
+    test.assert_eq(int_hex(PbTypeSint64, 0 - 2), "0803")
+    test.assert_eq(int_hex(PbTypeFixed32, 1), "0d01000000")
+    test.assert_eq(int_hex(PbTypeSfixed32, 0 - 1), "0dffffffff")
+    test.assert_eq(int_hex(PbTypeFixed64, 1), "090100000000000000")
+    test.assert_eq(int_hex(PbTypeSfixed64, 0 - 1), "09ffffffffffffffff")
+    test.assert_eq(int_hex(PbTypeUint64, 150), "089601")
+    test.assert_eq(int_hex(PbTypeUint32, 4294967295), "08ffffffff0f")
+
+@test
+fn test_a_thirty_two_bit_type_refuses_what_it_cannot_carry()
+    var c = bytes.cursor_le(bytes.zeros(16))
+    for t in [PbTypeInt32, PbTypeEnum]
+        match pbcodec.write_int(2, t, 2147483648, c)
+            Ok(_)  => test.fail("2^31 is not an int32")
+            Err(e) => test.assert_eq(e == PbValueOutOfRange(field: 2, value: 2147483648), true)
+    match pbcodec.write_int(2, PbTypeUint32, 0 - 1, c)
+        Ok(_)  => test.fail("-1 is not a uint32")
+        Err(e) => test.assert_eq(e == PbValueOutOfRange(field: 2, value: 0 - 1), true)
+
+@test
+fn test_reals_flags_texts_and_submessages_size_and_write()
+    test.assert_eq(pbcodec.real_len(1, PbTypeFloat), 5)
+    test.assert_eq(pbcodec.real_len(1, PbTypeDouble), 9)
+    var c = bytes.cursor_le(bytes.zeros(14))
+    let _ = pbcodec.write_real(1, PbTypeFloat, 1.0, c)
+    let _ = pbcodec.write_real(1, PbTypeDouble, 1.0, c)
+    test.assert_eq(bytes.to_hex(c.finish()), "0d0000803f09000000000000f03f")
+    test.assert_eq(pbcodec.flag_len(1), 2)
+    test.assert_eq(pbcodec.text_len(1, "abc"), 5)
+    test.assert_eq(pbcodec.octets_len(1, hex("00")), 3)
+    test.assert_eq(pbcodec.nested_len(1, 3), 5)
+    var h = bytes.cursor_le(bytes.zeros(2))
+    match pbcodec.write_nested_head(1, 3, h)
+        Ok(n)  => test.assert_eq(n, 2)
+        Err(e) => test.fail(e.message())
+    test.assert_eq(bytes.to_hex(h.finish()), "0a03")
+    var none = bytes.cursor_le(bytes.zeros(0))
+    match pbcodec.write_nested_head(1, 3, none)
+        Ok(_)  => test.fail("no room")
+        Err(e) => test.assert_eq(e == PbBufferTooSmall(need: 1, left: 0), true)
+    match pbcodec.write_nested_head(0, 3, none)
+        Ok(_)  => test.fail("field 0")
+        Err(e) => test.assert_eq(e == PbBadFieldNumber(field: 0), true)
+
+fn ints_hex(t: PbFieldType, vs: [Int], packed: Bool) -> Str
+    let n = pbcodec.ints_len(1, t, vs, packed)
+    var c = bytes.cursor_le(bytes.zeros(n))
+    match pbcodec.write_ints(1, t, vs, packed, c)
+        Ok(k)  => test.assert_eq(k, n)
+        Err(e) => test.fail(e.message())
+    bytes.to_hex(c.finish())
+
+fn reals_hex(t: PbFieldType, vs: [Float], packed: Bool) -> Str
+    let n = pbcodec.reals_len(1, t, vs, packed)
+    var c = bytes.cursor_le(bytes.zeros(n))
+    match pbcodec.write_reals(1, t, vs, packed, c)
+        Ok(k)  => test.assert_eq(k, n)
+        Err(e) => test.fail(e.message())
+    bytes.to_hex(c.finish())
+
+fn flags_hex(vs: [Bool], packed: Bool) -> Str
+    let n = pbcodec.flags_len(1, vs, packed)
+    var c = bytes.cursor_le(bytes.zeros(n))
+    match pbcodec.write_flags(1, vs, packed, c)
+        Ok(k)  => test.assert_eq(k, n)
+        Err(e) => test.fail(e.message())
+    bytes.to_hex(c.finish())
+
+@test
+fn test_repeated_writers_pack_or_key_each_element_and_skip_empty_fields()
+    test.assert_eq(ints_hex(PbTypeInt32, [1, 2], true), "0a020102")
+    test.assert_eq(ints_hex(PbTypeInt32, [1, 2], false), "08010802")
+    test.assert_eq(ints_hex(PbTypeInt32, [], true), "")
+    test.assert_eq(reals_hex(PbTypeFloat, [1.0], true), "0a040000803f")
+    test.assert_eq(reals_hex(PbTypeDouble, [1.0], false), "09000000000000f03f")
+    test.assert_eq(reals_hex(PbTypeDouble, [], false), "")
+    test.assert_eq(flags_hex([true, false], true), "0a020100")
+    test.assert_eq(flags_hex([true], false), "0801")

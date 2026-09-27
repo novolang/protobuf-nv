@@ -26,6 +26,7 @@ use pbwire
 use pbread
 use pbunknown
 use pbwrite
+use pbcodec
 
 // Which syntax a file declares.
 //
@@ -231,41 +232,6 @@ pub struct PbFileSet
 
 // ── reading one ──────────────────────────────────────────────────────
 
-// One top-level field of a descriptor, with a group taken whole.
-struct PbItem
-    tag: PbTag
-    value: PbRaw
-    // The offset of the key and the length of the whole field.
-    at: Int
-    len: Int
-
-// The top-level fields of the `len` bytes at `off`.
-fn items(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<[PbItem], PbDecodeError>
-    let evs = pbread.walk_range(src, off, len, limits)!
-    var out: [PbItem] = []
-    var depth = 0
-    var start = 0
-    for ev in evs
-        match ev
-            PbFieldSeen(t, v, at, raw_len) =>
-                if depth == 0
-                    list.push(out, PbItem { tag: t, value: v, at: at, len: raw_len })
-            PbGroupStart(_, at)            =>
-                if depth == 0
-                    start = at
-                depth = depth + 1
-            PbGroupEnd(f, at)              =>
-                depth = depth - 1
-                if depth == 0
-                    let end = at + pbwire.key_len(pbwire.tag(f, PbWireEndGroup))
-                    list.push(out, PbItem { tag: pbwire.tag(f, PbWireStartGroup),
-                        value: PbRawBytes(data: bytes.zeros(0)), at: start, len: end - start })
-    Ok(out)
-
-// Keep an item's bytes in `u`.
-fn kept(u: PbUnknownSet, src: Bytes, it: PbItem) -> PbUnknownSet
-    pbunknown.keep(u, it.tag, bytes.slice(src, it.at, it.at + it.len))
-
 fn text(v: PbRaw) -> Str
     match v
         PbRawBytes(d) => bytes.to_str(d)
@@ -282,7 +248,7 @@ fn flag(v: PbRaw) -> Bool
         _              => false
 
 // Where a length-delimited item's payload starts, and its size.
-fn body_of(it: PbItem) -> (Int, Int)
+fn body_of(it: PbPiece) -> (Int, Int)
     match it.value
         PbRawBytes(d) => (it.at + it.len - bytes.len(d), bytes.len(d))
         _             => (it.at + it.len, 0)
@@ -311,13 +277,13 @@ fn deeper(depth: Int, at: Int, limits: PbLimits) -> Result<Int, PbDecodeError>
 // ```
 pub fn parse_file_set(src: Bytes, limits: PbLimits) -> Result<PbFileSet, PbDecodeError> []
     var files: [PbFile] = []
-    for it in items(src, 0, bytes.len(src), limits)!
+    for it in pbcodec.pieces_in(src, 0, bytes.len(src), limits)!
         if it.tag.field == 1 and wire_is_bytes(it)
             let (off, n) = body_of(it)
             list.push(files, file_at(src, off, n, limits)!)
     Ok(PbFileSet { files: files })
 
-fn wire_is_bytes(it: PbItem) -> Bool
+fn wire_is_bytes(it: PbPiece) -> Bool
     match it.value
         PbRawBytes(_) => it.tag.wire == PbWireBytes
         _             => false
@@ -331,7 +297,7 @@ pub fn parse_file(src: Bytes, limits: PbLimits) -> Result<PbFile, PbDecodeError>
     file_at(src, 0, bytes.len(src), limits)
 
 fn file_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<PbFile, PbDecodeError>
-    let its = items(src, off, len, limits)!
+    let its = pbcodec.pieces_in(src, off, len, limits)!
     var name = ""
     var package = ""
     var syntax = ""
@@ -378,7 +344,7 @@ fn syntax_of_text(s: Str) -> PbSyntax
     syntax_of_name(s) ?? PbSyntaxOther(name: s)
 
 // The integers of a repeated `int32` item, packed or not.
-fn ints(it: PbItem, limits: PbLimits) -> Result<[Int], PbDecodeError>
+fn ints(it: PbPiece, limits: PbLimits) -> Result<[Int], PbDecodeError>
     match it.value
         PbRawVarint(b) => Ok([pbwire.int32_of_wire(b)])
         PbRawBytes(d)  =>
@@ -394,7 +360,7 @@ fn file_options_at(src: Bytes, off: Int, len: Int,
     var go = ""
     var java = ""
     var unknown = pbunknown.empty()
-    for it in items(src, off, len, limits)!
+    for it in pbcodec.pieces_in(src, off, len, limits)!
         let f = it.tag.field
         if f == 1 and wire_is_bytes(it)
             java = text(it.value)
@@ -403,7 +369,7 @@ fn file_options_at(src: Bytes, off: Int, len: Int,
         else if f == 23 and it.tag.wire == PbWireVarint
             deprecated = flag(it.value)
         else
-            unknown = kept(unknown, src, it)
+            unknown = pbcodec.keep(unknown, src, it)
     Ok(PbFileOptions { deprecated: deprecated, go_package: go, java_package: java,
         unknown: unknown })
 
@@ -423,7 +389,7 @@ fn opts_at(src: Bytes, off: Int, len: Int, dep_field: Int, special_field: Int,
     var deprecated = false
     var special = false
     var unknown = pbunknown.empty()
-    for it in items(src, off, len, limits)!
+    for it in pbcodec.pieces_in(src, off, len, limits)!
         let f = it.tag.field
         let varint = it.tag.wire == PbWireVarint
         if f == dep_field and varint
@@ -431,7 +397,7 @@ fn opts_at(src: Bytes, off: Int, len: Int, dep_field: Int, special_field: Int,
         else if f == special_field and varint
             special = flag(it.value)
         else
-            unknown = kept(unknown, src, it)
+            unknown = pbcodec.keep(unknown, src, it)
     Ok(PbOpts { deprecated: deprecated, special: special, unknown: unknown })
 
 fn no_opts() -> PbOpts
@@ -439,7 +405,7 @@ fn no_opts() -> PbOpts
 
 fn message_at(src: Bytes, off: Int, len: Int, scope: Str, depth: Int,
               limits: PbLimits) -> Result<PbMessage, PbDecodeError>
-    let its = items(src, off, len, limits)!
+    let its = pbcodec.pieces_in(src, off, len, limits)!
     var name = ""
     for it in its
         if it.tag.field == 1
@@ -495,7 +461,7 @@ fn is_synthetic(fields: [PbField], index: Int) -> Bool
 
 fn oneof_name_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<Str, PbDecodeError>
     var name = ""
-    for it in items(src, off, len, limits)!
+    for it in pbcodec.pieces_in(src, off, len, limits)!
         if it.tag.field == 1
             name = text(it.value)
     Ok(name)
@@ -506,7 +472,7 @@ fn range_at(src: Bytes, off: Int, len: Int, exclusive: Bool,
             limits: PbLimits) -> Result<PbNumberRange, PbDecodeError>
     var first = 0
     var end = 0
-    for it in items(src, off, len, limits)!
+    for it in pbcodec.pieces_in(src, off, len, limits)!
         if it.tag.field == 1
             first = num(it.value)
         else if it.tag.field == 2
@@ -534,7 +500,7 @@ fn field_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<PbField,
     var p3opt = false
     var default_value = ""
     var deprecated = false
-    for it in items(src, off, len, limits)!
+    for it in pbcodec.pieces_in(src, off, len, limits)!
         let f = it.tag.field
         if f == 1
             name = text(it.value)
@@ -552,7 +518,7 @@ fn field_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<PbField,
             default_value = text(it.value)
         else if f == 8 and wire_is_bytes(it)
             let (b, n) = body_of(it)
-            for o in items(src, b, n, limits)!
+            for o in pbcodec.pieces_in(src, b, n, limits)!
                 if o.tag.field == 2 and o.tag.wire == PbWireVarint
                     packed_set = true
                     packed = flag(o.value)
@@ -577,7 +543,7 @@ fn enum_at(src: Bytes, off: Int, len: Int, scope: Str,
     var name = ""
     var values: [PbEnumValue] = []
     var o = no_opts()
-    for it in items(src, off, len, limits)!
+    for it in pbcodec.pieces_in(src, off, len, limits)!
         let (b, n) = body_of(it)
         let f = it.tag.field
         if f == 1
@@ -598,7 +564,7 @@ fn enum_value_at(src: Bytes, off: Int, len: Int,
     var name = ""
     var number = 0
     var deprecated = false
-    for it in items(src, off, len, limits)!
+    for it in pbcodec.pieces_in(src, off, len, limits)!
         let f = it.tag.field
         if f == 1
             name = text(it.value)
@@ -614,7 +580,7 @@ fn service_at(src: Bytes, off: Int, len: Int, scope: Str,
     var name = ""
     var methods: [PbMethod] = []
     var o = no_opts()
-    for it in items(src, off, len, limits)!
+    for it in pbcodec.pieces_in(src, off, len, limits)!
         let (b, n) = body_of(it)
         let f = it.tag.field
         if f == 1
@@ -633,7 +599,7 @@ fn method_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<PbMetho
     var client = false
     var server = false
     var o = no_opts()
-    for it in items(src, off, len, limits)!
+    for it in pbcodec.pieces_in(src, off, len, limits)!
         let f = it.tag.field
         if f == 1
             name = text(it.value)
