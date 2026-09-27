@@ -436,7 +436,7 @@ fn message_at(src: Bytes, off: Int, len: Int, scope: Str, depth: Int,
         else if f == 4
             list.push(enums, enum_at(src, b, n, full, limits)!)
         else if f == 5
-            list.push(ext_ranges, range_at(src, b, n, true, limits)!)
+            list.push(ext_ranges, range_at(src, b, n, limits)!)
         else if f == 6
             list.push(extensions, field_at(src, b, n, limits)!)
         else if f == 7
@@ -444,7 +444,7 @@ fn message_at(src: Bytes, off: Int, len: Int, scope: Str, depth: Int,
         else if f == 8
             list.push(oneof_names, oneof_name_at(src, b, n, limits)!)
         else if f == 9
-            list.push(res_ranges, range_at(src, b, n, true, limits)!)
+            list.push(res_ranges, range_at(src, b, n, limits)!)
         else if f == 10
             list.push(res_names, text(it.value))
     var oneofs: [PbOneof] = []
@@ -469,9 +469,8 @@ fn oneof_name_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<Str
             name = text(it.value)
     Ok(name)
 
-// A range with an exclusive end when `exclusive`, as a message's
-// ranges are stored.
-fn range_at(src: Bytes, off: Int, len: Int, exclusive: Bool,
+// A message's range, whose end `descriptor.proto` stores exclusive.
+fn range_at(src: Bytes, off: Int, len: Int,
             limits: PbLimits) -> Result<PbNumberRange, PbDecodeError>
     var first = 0
     var end = 0
@@ -480,11 +479,7 @@ fn range_at(src: Bytes, off: Int, len: Int, exclusive: Bool,
             first = num(it.value)
         else if it.tag.field == 2
             end = num(it.value)
-    let last = if exclusive
-        end - 1
-    else
-        end
-    Ok(PbNumberRange { first: first, last: last })
+    Ok(PbNumberRange { first: first, last: end - 1 })
 
 fn label_of(n: Int) -> PbLabel
     match n

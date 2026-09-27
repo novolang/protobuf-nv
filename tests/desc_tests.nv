@@ -8,7 +8,6 @@ use pbwire
 use pbread
 use pbunknown
 use pbdesc
-use pberr
 
 fn hex(h: Str) -> Bytes
     bytes.from_hex(h) ?? bytes.zeros(0)

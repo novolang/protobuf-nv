@@ -8,7 +8,6 @@
 
 use std.test
 use std.bytes
-use pbwire
 use pbread
 use pbunknown
 use pbdesc

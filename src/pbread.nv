@@ -236,7 +236,9 @@ fn run(buf: Bytes, base: Int, final: Bool, limits: PbLimits, groups: [Int],
     var pos = 0
     var need = 0
     let n = bytes.len(buf)
-    while pos < n and need == 0
+    loop
+        if pos >= n or need != 0
+            break
         match scan(buf, pos, base, final, limits)!
             PbScanNeed(k)        =>
                 need = k
@@ -387,25 +389,33 @@ pub fn walk_range(src: Bytes, off: Int, len: Int,
 // `PbPackedRemainder` when the payload does not divide into whole
 // elements or `t` may not be packed.
 pub fn unpack(data: Bytes, t: PbFieldType) -> Result<[PbRaw], PbDecodeError> []
-    let n = bytes.len(data)
-    let _ = pbwire.packed_element_count(data, 0, n, t)!
+    let count = pbwire.packed_element_count(data, 0, bytes.len(data), t)!
+    let w = pbwire.wire_for(t)
     var out: [PbRaw] = []
     var i = 0
-    match pbwire.wire_for(t)
-        PbWireFixed64 =>
-            while i < n
-                list.push(out, PbRawFixed64(bits: pbwire.read_fixed64_at(data, i)!.value))
-                i = i + 8
-        PbWireFixed32 =>
-            while i < n
-                list.push(out, PbRawFixed32(bits: pbwire.read_fixed32_at(data, i)!.value))
-                i = i + 4
-        _             =>
-            while i < n
-                let v = pbwire.read_varint_at(data, i)!
-                list.push(out, PbRawVarint(bits: v.value))
-                i = i + v.len
+    for k in 0..count
+        let e = element_at(data, i, w)!
+        list.push(out, e.raw)
+        i = i + e.len
     Ok(out)
+
+// One element of a packed payload, and the bytes it took.
+struct PbElement
+    raw: PbRaw
+    len: Int
+
+// The element of wire type `w` at `i`.
+fn element_at(data: Bytes, i: Int, w: PbWireType) -> Result<PbElement, PbDecodeError>
+    match w
+        PbWireFixed64 =>
+            let v = pbwire.read_fixed64_at(data, i)!
+            Ok(PbElement { raw: PbRawFixed64(bits: v.value), len: 8 })
+        PbWireFixed32 =>
+            let v = pbwire.read_fixed32_at(data, i)!
+            Ok(PbElement { raw: PbRawFixed32(bits: v.value), len: 4 })
+        _             =>
+            let v = pbwire.read_varint_at(data, i)!
+            Ok(PbElement { raw: PbRawVarint(bits: v.value), len: v.len })
 
 // ── keeping what is not known ────────────────────────────────────────
 
@@ -487,7 +497,9 @@ pub fn drain<S: Read[e]>(r: PbReader, src: S, limit: Int) -> Result<PbStep, PbDe
     var cur = r
     var events: [PbEvent] = []
     var got = 0
-    while got < limit
+    loop
+        if got >= limit
+            break
         let want = if limit - got < 4096
             limit - got
         else

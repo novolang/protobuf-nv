@@ -665,12 +665,13 @@ pub fn float_of_bits32(bits: Int) -> Float []
 pub fn first_non_utf8(data: Bytes, off: Int, len: Int) -> Int []
     let end = off + len
     var i = off
-    while i < end
+    loop
+        if i >= end
+            return 0 - 1
         let n = utf8_len_at(data, i, end)
         if n == 0
             return i
         i = i + n
-    0 - 1
 
 // The length of the well-formed UTF-8 sequence at `i`, or 0.
 fn utf8_len_at(data: Bytes, i: Int, end: Int) -> Int
@@ -814,7 +815,9 @@ pub fn packed_element_count(src: Bytes, off: Int, len: Int,
     var n = 0
     var i = off
     let end = off + len
-    while i < end
+    loop
+        if i >= end
+            return Ok(n)
         let run = run_len(src, i)
         if i + run > end or byte(src, i + run - 1) >= 128
             return Err(PbPackedRemainder(at: i, left: end - i))
@@ -822,7 +825,6 @@ pub fn packed_element_count(src: Bytes, off: Int, len: Int,
             return Err(PbVarintOverflow(at: i, bytes: run))
         i = i + run
         n = n + 1
-    Ok(n)
 
 // ── skipping ─────────────────────────────────────────────────────────
 

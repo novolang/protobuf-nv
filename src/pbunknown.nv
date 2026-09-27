@@ -17,7 +17,6 @@
 // the wire.
 
 use std.bytes
-use pbwire
 
 // One field that arrived and was not recognised: its tag, and the bytes
 // it occupied.

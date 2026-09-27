@@ -7,13 +7,11 @@
 
 use std.test
 use std.bytes
-use pbwire
 use pbread
 use pbunknown
 use pbdesc
 use pbdyn
 use pbgen
-use pberr
 
 fn hex(h: Str) -> Bytes
     bytes.from_hex(h) ?? bytes.zeros(0)

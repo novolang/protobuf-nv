@@ -12,7 +12,6 @@ use pbwire
 use pbread
 use pbunknown
 use pbwrite
-use pbdesc
 use pbdyn
 use pberr
 
