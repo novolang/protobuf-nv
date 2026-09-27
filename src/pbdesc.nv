@@ -1,152 +1,119 @@
-// pbdesc — what a `.proto` file says, as novo-lang values.
+// pbdesc — what a `.proto` file declares, as novo-lang values.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
+// These values come from a descriptor set: the binary
+// `FileDescriptorSet` that `protoc --descriptor_set_out` writes and that
+// a gRPC reflection service serves.  A descriptor set is itself a
+// protobuf message, so reading one needs only `pbread`, and this
+// package describes messages without a `.proto` text parser.
 //
-// WHERE THESE VALUES COME FROM.  Not from a `.proto` file: from a
-// DESCRIPTOR SET, the binary `FileDescriptorSet` that `protoc
-// --descriptor_set_out` writes and that every gRPC reflection service
-// serves.  A descriptor set is itself a protobuf message, so parsing
-// one needs nothing but `pbread` — which is the property that makes
-// this package able to describe messages without a text parser at all.
-//
-// A `.proto` TEXT PARSER IS A SEPARATE PACKAGE, and the reason is worth
-// stating rather than leaving as an omission.  The text grammar is
-// nearly the whole of protobuf's surface — imports and import paths,
-// nested option syntax, custom options that are themselves extensions,
-// editions, reserved statements, three kinds of comment with a
-// documented attachment rule — and none of it appears on the wire.  A
-// package that did both would be two packages sharing a name, and the
-// half that matters for reading bytes would carry the half that does
-// not.
-//
-// THE SHAPE MIRRORS descriptor.proto, DELIBERATELY.  `PbMessage` nests
+// The structs follow `descriptor.proto`.  `PbMessage` nests
 // `PbMessage` because `DescriptorProto` nests `DescriptorProto`, and
-// the field names are the same names.  A reader checking this port
-// against Google's own `descriptor.proto` should be able to do it line
-// by line; a tidier arrangement of our own would have to be checked
-// against nothing.
+// the field names are the reference's names, so the port can be
+// checked against it line by line.  The fields this package does not
+// name are dropped on reading, except the options of files, messages,
+// enums, services and methods, whose other fields are kept whole in
+// each struct's `unknown` set and written back.  The dropped fields
+// are a field's and a oneof's other options, an enum's reserved
+// ranges, `weak_dependency`, `source_code_info` and `edition`.
 //
-// READING AND CHECKING ARE TWO JOBS.  `parse_file_set` answers what the
-// bytes said — a `PbDecodeError` when they are not a descriptor set at
-// all.  `validate` answers whether what they said describes a program —
-// a list of `PbSchemaError`, which may be long, because a person fixing
-// a schema wants every complaint at once rather than one per run.
+// Reading and checking are separate.  `parse_file_set` answers what
+// the bytes say, or a `PbDecodeError` when they are not a descriptor
+// set.  `validate` answers whether what they say describes a program,
+// as a list of every `PbSchemaError` at once.
 
 use std.bytes
+use pbwire
 use pbread
+use pbunknown
+use pbwrite
 
 // Which syntax a file declares.
 //
-// WHAT IS IN, precisely, because "supports proto3" is not a claim
-// anyone can check:
-//
-//   proto3, whole.  Singular fields with implicit presence, `optional`
-//   with explicit presence (the `proto3_optional` flag), packed
-//   repeated by default, open enums, maps, oneofs, `reserved`.
-//
-//   proto2 ON THE WIRE, whole: groups, `required`, `optional` with
-//   explicit presence, unpacked repeated by default, closed enums,
-//   extension ranges read as ranges.  Every proto2 message can be read
-//   and written by this package.
-//
-//   proto2 IN THE GENERATOR, partly.  `pbgen` will not generate for a
-//   file with extensions in it: an extension is a field declared
-//   outside the message that carries it, which needs a registry the
-//   generated code consults at run time, and that is a design decision
-//   of its own rather than a line of code.  `PbNotInProto3` and
-//   `pbgen`'s refusal list name it.
-//
-//   EDITIONS ARE NOT IN.  A file whose `syntax` is `"editions"` is
-//   `PbUnknownSyntax`.  The feature-resolution rules are a
-//   specification of their own, they change what every field's
-//   presence and packing mean, and guessing at them would produce a
-//   generator whose output is wrong in a way nothing shows.
+// proto3 is read whole: implicit and explicit presence, packed repeated
+// fields by default, open enums, maps, oneofs and `reserved`.  proto2
+// is read whole on the wire: groups, `required`, unpacked repeated
+// fields by default, closed enums and extensions.  A file declaring an
+// edition is read and carried as `PbSyntaxOther`; its feature
+// resolution is not implemented, and `validate` reports it.
 pub enum PbSyntax
-    // `syntax = "proto2";`, and a file with no `syntax` statement at
-    // all — which is what the specification says an absent one means.
+    // `syntax = "proto2";`, and a file with no `syntax` statement,
+    // which the specification reads as proto2.
     PbProto2
     // `syntax = "proto3";`
     PbProto3
+    // Any other value of the descriptor's `syntax` field, such as
+    // `"editions"`.
+    PbSyntaxOther(name: Str)
 
-// The name a file's `syntax` statement carries: `"proto2"` or
-// `"proto3"`.
+// The name a file's `syntax` statement carries.
 pub fn syntax_name(s: PbSyntax) -> Str []
-    todo("pbdesc.syntax_name")
+    match s
+        PbProto2          => "proto2"
+        PbProto3          => "proto3"
+        PbSyntaxOther(n)  => n
 
-// The syntax a name declares, or `None` for anything else —
-// `"editions"` included.
+// The syntax a name declares: `PbProto2` for `"proto2"`, `PbProto3`
+// for `"proto3"`, and `None` for anything else, `"editions"` included.
 pub fn syntax_of_name(name: Str) -> ?PbSyntax []
-    todo("pbdesc.syntax_of_name")
+    match name
+        "proto2" => Some(PbProto2)
+        "proto3" => Some(PbProto3)
+        _        => None
 
 // How many times a field may appear.
 pub enum PbLabel
-    // At most once.  In proto2 that is explicit presence; in proto3 it
-    // is implicit presence unless the field also carries
-    // `proto3_optional`.
+    // At most once.
     PbLabelOptional
-    // Exactly once — proto2 only, and the feature proto3 removed
-    // because a required field cannot ever be taken out again.
+    // Exactly once.  proto2 only.
     PbLabelRequired
     // Any number of times.
     PbLabelRepeated
 
 // A closed range of field numbers, both ends included.
 //
-// What `reserved 2 to 5;` and `extensions 100 to 199;` each carry.
+// `descriptor.proto` stores a message's ranges with an exclusive end;
+// this struct holds the last number itself.
 pub struct PbNumberRange
     first: Int
     last: Int
 
-// One field of one message.
+// One field of one message, or one extension.
 //
-// The field names are `FieldDescriptorProto`'s, so this struct can be
-// checked against `descriptor.proto` rather than against this package.
+// The names are `FieldDescriptorProto`'s.
 pub struct PbField
-    // The name as the `.proto` file wrote it: `unit_price`.
+    // The name the `.proto` file wrote: `unit_price`.
     name: Str
-    // The name protobuf's JSON mapping uses, `unitPrice` — from the
-    // descriptor when it carries one, and `default_json_name` when it
-    // does not.
+    // The name protobuf's JSON mapping uses: the descriptor's when it
+    // carries one, and `default_json_name` of `name` when it does not.
     json_name: Str
-    // `1 ..= 536870911`, outside the reserved range.
     number: Int
     label: PbLabel
-    // Which of the eighteen declared types.
     field_type: PbFieldType
-    // The fully-qualified name a `message` or `enum` field points at,
-    // leading dot included: `.acme.Money`.  `""` for a scalar.
+    // The fully-qualified name a `message`, `enum` or `group` field
+    // points at, leading dot included: `.acme.Money`.  `""` for a
+    // scalar.
     type_name: Str
-    // The index into the message's `oneofs`, or -1 when the field is
-    // not in one.
+    // The fully-qualified name of the message an extension extends.
+    // `""` for an ordinary field.
+    extendee: Str
+    // The index into the message's `oneofs`, or -1.
     oneof_index: Int
-    // Whether the descriptor said `[packed = true]` or
-    // `[packed = false]` — `packed_of` is the function that resolves
-    // this against the syntax's default, and is what a reader should
-    // call.
+    // Whether the descriptor set `[packed = ...]`, and to what.
+    // `packed_of` resolves the pair against the syntax's default.
     packed_set: Bool
     packed_value: Bool
-    // proto3's `optional` keyword: the field is in a synthetic oneof of
-    // its own, which is how proto3 gives a singular field explicit
-    // presence.  `oneof_index` points at that synthetic oneof, and a
-    // generator must not emit it as a user-visible oneof.
+    // proto3's `optional` keyword: the field sits in a synthetic oneof
+    // of its own, which gives a singular field explicit presence.
     proto3_optional: Bool
-    // proto2's `[default = ...]`, exactly as the `.proto` file wrote
-    // it, unparsed.  `""` when there is none.  Unparsed because the
-    // text's meaning depends on the field's type — `"1"` is an integer
-    // here and a string there — and parsing it belongs with the type.
+    // proto2's `[default = ...]` exactly as written, or `""`.
     default_value: Str
-    // `[deprecated = true]`.
     deprecated: Bool
 
-// One oneof of one message: a set of fields at most one of which is
-// set.
+// One oneof: a set of fields of which at most one is set.
 pub struct PbOneof
     name: Str
-    // True when the compiler made this oneof to carry a single
-    // proto3 `optional` field rather than the `.proto` file declaring
-    // it.  A generator emits presence for the field and no enum for
-    // the oneof.
+    // True when the oneof exists only to carry one proto3 `optional`
+    // field.  Such a oneof is not a oneof to a program.
     synthetic: Bool
 
 // One value of one enum.
@@ -162,21 +129,15 @@ pub struct PbEnum
     // The fully-qualified name, leading dot included: `.acme.Currency`.
     full_name: Str
     values: [PbEnumValue]
-    // `option allow_alias = true;` — two names for one number, which is
-    // refused unless the file asks for it.
+    // `option allow_alias = true;`: two names may share a number.
     allow_alias: Bool
-    // proto3 requires the first value to be zero, and a generator needs
-    // to know which value that is because it is the default.
+    // The name of the first value numbered 0, or `""` when none is.
     zero_value: Str
     deprecated: Bool
-    // Every option this package does not name, kept whole.
+    // The fields of the enum's options this package does not name.
     unknown: PbUnknownSet
 
 // One message.
-//
-// `nested` holds `PbMessage` because `DescriptorProto.nested_type`
-// holds `DescriptorProto`: the shape is the reference's, so the port is
-// checkable against it.
 pub struct PbMessage
     // The simple name: `Order`.
     name: Str
@@ -186,25 +147,22 @@ pub struct PbMessage
     oneofs: [PbOneof]
     nested: [PbMessage]
     enums: [PbEnum]
-    // proto2's `extensions 100 to 199;`.  Read and carried; `pbgen`
-    // refuses to generate for a file that has any.
+    // The `extend` blocks declared inside this message.
+    extensions: [PbField]
+    // proto2's `extensions 100 to 199;`.
     extension_ranges: [PbNumberRange]
-    // `reserved 2 to 5;` — numbers no future version may reuse.
+    // `reserved 2 to 5;`
     reserved_ranges: [PbNumberRange]
     // `reserved "old_name";`
     reserved_names: [Str]
-    // `options.map_entry` — set by the compiler, never by a person, on
-    // the two-field message it invents for every `map<K, V>` field.
-    // `is_map_field` is what a caller should ask; this is the raw flag.
+    // Set by the compiler on the two-field message it makes for every
+    // `map<K, V>` field.
     map_entry: Bool
     deprecated: Bool
-    // Every option this package does not name, kept whole.
+    // The fields of the message's options this package does not name.
     unknown: PbUnknownSet
 
 // How a method streams.
-//
-// The four combinations of two booleans, named, because "client
-// streaming and not server streaming" is not how anyone says it.
 pub enum PbStreaming
     // One request, one response.
     PbUnary
@@ -212,19 +170,19 @@ pub enum PbStreaming
     PbServerStream
     // A stream of requests, one response.
     PbClientStream
-    // Both directions stream, independently.
+    // Both directions stream.
     PbBidiStream
 
 // One method of one service.
 pub struct PbMethod
     name: Str
-    // The fully-qualified name of the request message, leading dot
-    // included.
+    // The fully-qualified request type, leading dot included.
     input_type: Str
-    // The fully-qualified name of the response message.
+    // The fully-qualified response type.
     output_type: Str
     streaming: PbStreaming
     deprecated: Bool
+    // The fields of the method's options this package does not name.
     unknown: PbUnknownSet
 
 // One service.
@@ -235,24 +193,18 @@ pub struct PbService
     full_name: Str
     methods: [PbMethod]
     deprecated: Bool
+    // The fields of the service's options this package does not name.
     unknown: PbUnknownSet
 
-// The options of one file that this package names.
-//
-// A deliberately short list.  Protobuf's options are themselves a
-// message and a custom option is an extension of it, so naming them all
-// would mean shipping an extension registry; `unknown` keeps every
-// option this struct does not name, byte for byte, so a caller with
-// its own extension can find it.
+// The options of one file that this package names, and the rest kept
+// whole.
 pub struct PbFileOptions
     // `option deprecated = true;`
     deprecated: Bool
-    // `option go_package`, `option java_package`: carried because a
-    // generator that ignores them produces files that collide.  `""`
-    // when absent.
+    // `option go_package` and `option java_package`, or `""`.
     go_package: Str
     java_package: Str
-    // Everything else, kept whole.
+    // Every other file option.
     unknown: PbUnknownSet
 
 // One `.proto` file's declarations.
@@ -262,35 +214,89 @@ pub struct PbFile
     // `package acme.orders;`, or `""`.
     package: Str
     syntax: PbSyntax
-    // The paths of the files this one imports, in declaration order.
+    // The imported paths, in declaration order.
     dependency: [Str]
-    // The indices into `dependency` of the imports declared
-    // `public` — an import a file's own importers also get.
+    // The indices into `dependency` of the `import public` lines.
     public_dependency: [Int]
     messages: [PbMessage]
     enums: [PbEnum]
     services: [PbService]
+    // The top-level `extend` blocks.
+    extensions: [PbField]
     options: PbFileOptions
 
 // A whole descriptor set: every file, with its imports.
-//
-// A set is self-contained by construction — `protoc` writes the
-// transitive closure — so every `type_name` in it resolves inside it,
-// and `validate` says so when one does not.
 pub struct PbFileSet
     files: [PbFile]
 
 // ── reading one ──────────────────────────────────────────────────────
 
+// One top-level field of a descriptor, with a group taken whole.
+struct PbItem
+    tag: PbTag
+    value: PbRaw
+    // The offset of the key and the length of the whole field.
+    at: Int
+    len: Int
+
+// The top-level fields of the `len` bytes at `off`.
+fn items(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<[PbItem], PbDecodeError>
+    let evs = pbread.walk_range(src, off, len, limits)!
+    var out: [PbItem] = []
+    var depth = 0
+    var start = 0
+    for ev in evs
+        match ev
+            PbFieldSeen(t, v, at, raw_len) =>
+                if depth == 0
+                    list.push(out, PbItem { tag: t, value: v, at: at, len: raw_len })
+            PbGroupStart(_, at)            =>
+                if depth == 0
+                    start = at
+                depth = depth + 1
+            PbGroupEnd(f, at)              =>
+                depth = depth - 1
+                if depth == 0
+                    let end = at + pbwire.key_len(pbwire.tag(f, PbWireEndGroup))
+                    list.push(out, PbItem { tag: pbwire.tag(f, PbWireStartGroup),
+                        value: PbRawBytes(data: bytes.zeros(0)), at: start, len: end - start })
+    Ok(out)
+
+// Keep an item's bytes in `u`.
+fn kept(u: PbUnknownSet, src: Bytes, it: PbItem) -> PbUnknownSet
+    pbunknown.keep(u, it.tag, bytes.slice(src, it.at, it.at + it.len))
+
+fn text(v: PbRaw) -> Str
+    match v
+        PbRawBytes(d) => bytes.to_str(d)
+        _             => ""
+
+fn num(v: PbRaw) -> Int
+    match v
+        PbRawVarint(b) => pbwire.int32_of_wire(b)
+        _              => 0
+
+fn flag(v: PbRaw) -> Bool
+    match v
+        PbRawVarint(b) => b != 0
+        _              => false
+
+// Where a length-delimited item's payload starts, and its size.
+fn body_of(it: PbItem) -> (Int, Int)
+    match it.value
+        PbRawBytes(d) => (it.at + it.len - bytes.len(d), bytes.len(d))
+        _             => (it.at + it.len, 0)
+
+// Refuse nesting past the limit.
+fn deeper(depth: Int, at: Int, limits: PbLimits) -> Result<Int, PbDecodeError>
+    if depth + 1 > limits.max_depth
+        return Err(PbDepthExceeded(at: at, limit: limits.max_depth))
+    Ok(depth + 1)
+
 // Parse a binary `FileDescriptorSet`.
 //
-// The bytes are what `protoc --descriptor_set_out` writes and what a
-// gRPC reflection service serves, so a program can describe a service
-// it has never been compiled against.
-//
-// Answers a decode refusal only: a set that parses but does not
-// describe a program is `validate`'s answer, because a caller reading
-// a set to LOOK SOMETHING UP does not need it to be generatable.
+// Answers a decode refusal only.  A set that parses but does not
+// describe a program is `validate`'s answer.
 //
 // ```novo
 // use std.bytes
@@ -304,32 +310,519 @@ pub struct PbFileSet
 //         Err(e) => println(e.message())
 // ```
 pub fn parse_file_set(src: Bytes, limits: PbLimits) -> Result<PbFileSet, PbDecodeError> []
-    todo("pbdesc.parse_file_set")
+    var files: [PbFile] = []
+    for it in items(src, 0, bytes.len(src), limits)!
+        if it.tag.field == 1 and wire_is_bytes(it)
+            let (off, n) = body_of(it)
+            list.push(files, file_at(src, off, n, limits)!)
+    Ok(PbFileSet { files: files })
+
+fn wire_is_bytes(it: PbItem) -> Bool
+    match it.value
+        PbRawBytes(_) => it.tag.wire == PbWireBytes
+        _             => false
 
 // Parse a single binary `FileDescriptorProto`.
 //
-// What a reflection service answers one file at a time.  A file parsed
-// alone cannot resolve names its imports declare, so `validate` on a
-// set of one will say so; that is information rather than a fault.
+// A reflection service answers one file at a time.  A file read alone
+// cannot resolve the names its imports declare, and `validate` of a
+// set holding only it says so.
 pub fn parse_file(src: Bytes, limits: PbLimits) -> Result<PbFile, PbDecodeError> []
-    todo("pbdesc.parse_file")
+    file_at(src, 0, bytes.len(src), limits)
+
+fn file_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<PbFile, PbDecodeError>
+    let its = items(src, off, len, limits)!
+    var name = ""
+    var package = ""
+    var syntax = ""
+    for it in its
+        if it.tag.field == 1
+            name = text(it.value)
+        else if it.tag.field == 2
+            package = text(it.value)
+        else if it.tag.field == 12
+            syntax = text(it.value)
+    let scope = if package == "" then "" else ".${package}"
+    var deps: [Str] = []
+    var public: [Int] = []
+    var messages: [PbMessage] = []
+    var enums: [PbEnum] = []
+    var services: [PbService] = []
+    var extensions: [PbField] = []
+    var options = PbFileOptions { deprecated: false, go_package: "", java_package: "",
+        unknown: pbunknown.empty() }
+    for it in its
+        let (b, n) = body_of(it)
+        let f = it.tag.field
+        if f == 3
+            list.push(deps, text(it.value))
+        else if f == 4 and wire_is_bytes(it)
+            list.push(messages, message_at(src, b, n, scope, 1, limits)!)
+        else if f == 5 and wire_is_bytes(it)
+            list.push(enums, enum_at(src, b, n, scope, limits)!)
+        else if f == 6 and wire_is_bytes(it)
+            list.push(services, service_at(src, b, n, scope, limits)!)
+        else if f == 7 and wire_is_bytes(it)
+            list.push(extensions, field_at(src, b, n, limits)!)
+        else if f == 8 and wire_is_bytes(it)
+            options = file_options_at(src, b, n, limits)!
+        else if f == 10
+            list.append(public, ints(it, limits)!)
+    Ok(PbFile { name: name, package: package, syntax: syntax_of_text(syntax),
+        dependency: deps, public_dependency: public, messages: messages, enums: enums,
+        services: services, extensions: extensions, options: options })
+
+fn syntax_of_text(s: Str) -> PbSyntax
+    if s == ""
+        return PbProto2
+    syntax_of_name(s) ?? PbSyntaxOther(name: s)
+
+// The integers of a repeated `int32` item, packed or not.
+fn ints(it: PbItem, limits: PbLimits) -> Result<[Int], PbDecodeError>
+    match it.value
+        PbRawVarint(b) => Ok([pbwire.int32_of_wire(b)])
+        PbRawBytes(d)  =>
+            var out: [Int] = []
+            for r in pbread.unpack(d, PbTypeInt32)!
+                list.push(out, num(r))
+            Ok(out)
+        _              => Ok([])
+
+fn file_options_at(src: Bytes, off: Int, len: Int,
+                   limits: PbLimits) -> Result<PbFileOptions, PbDecodeError>
+    var deprecated = false
+    var go = ""
+    var java = ""
+    var unknown = pbunknown.empty()
+    for it in items(src, off, len, limits)!
+        let f = it.tag.field
+        if f == 1 and wire_is_bytes(it)
+            java = text(it.value)
+        else if f == 11 and wire_is_bytes(it)
+            go = text(it.value)
+        else if f == 23 and it.tag.wire == PbWireVarint
+            deprecated = flag(it.value)
+        else
+            unknown = kept(unknown, src, it)
+    Ok(PbFileOptions { deprecated: deprecated, go_package: go, java_package: java,
+        unknown: unknown })
+
+// The named flags of a message, enum, service or method options
+// message, and the rest kept whole.
+struct PbOpts
+    deprecated: Bool
+    // `map_entry` for a message, `allow_alias` for an enum.
+    special: Bool
+    unknown: PbUnknownSet
+
+// Read an options message whose `deprecated` flag is field
+// `dep_field` and whose second named flag, when it has one, is field
+// `special_field` (0 for none).
+fn opts_at(src: Bytes, off: Int, len: Int, dep_field: Int, special_field: Int,
+           limits: PbLimits) -> Result<PbOpts, PbDecodeError>
+    var deprecated = false
+    var special = false
+    var unknown = pbunknown.empty()
+    for it in items(src, off, len, limits)!
+        let f = it.tag.field
+        let varint = it.tag.wire == PbWireVarint
+        if f == dep_field and varint
+            deprecated = flag(it.value)
+        else if f == special_field and varint
+            special = flag(it.value)
+        else
+            unknown = kept(unknown, src, it)
+    Ok(PbOpts { deprecated: deprecated, special: special, unknown: unknown })
+
+fn no_opts() -> PbOpts
+    PbOpts { deprecated: false, special: false, unknown: pbunknown.empty() }
+
+fn message_at(src: Bytes, off: Int, len: Int, scope: Str, depth: Int,
+              limits: PbLimits) -> Result<PbMessage, PbDecodeError>
+    let its = items(src, off, len, limits)!
+    var name = ""
+    for it in its
+        if it.tag.field == 1
+            name = text(it.value)
+    let full = "${scope}.${name}"
+    var fields: [PbField] = []
+    var oneof_names: [Str] = []
+    var nested: [PbMessage] = []
+    var enums: [PbEnum] = []
+    var extensions: [PbField] = []
+    var ext_ranges: [PbNumberRange] = []
+    var res_ranges: [PbNumberRange] = []
+    var res_names: [Str] = []
+    var o = no_opts()
+    for it in its
+        let (b, n) = body_of(it)
+        let f = it.tag.field
+        if not wire_is_bytes(it)
+            continue
+        if f == 2
+            list.push(fields, field_at(src, b, n, limits)!)
+        else if f == 3
+            let d = deeper(depth, it.at, limits)!
+            list.push(nested, message_at(src, b, n, full, d, limits)!)
+        else if f == 4
+            list.push(enums, enum_at(src, b, n, full, limits)!)
+        else if f == 5
+            list.push(ext_ranges, range_at(src, b, n, true, limits)!)
+        else if f == 6
+            list.push(extensions, field_at(src, b, n, limits)!)
+        else if f == 7
+            o = opts_at(src, b, n, 3, 7, limits)!
+        else if f == 8
+            list.push(oneof_names, oneof_name_at(src, b, n, limits)!)
+        else if f == 9
+            list.push(res_ranges, range_at(src, b, n, true, limits)!)
+        else if f == 10
+            list.push(res_names, text(it.value))
+    var oneofs: [PbOneof] = []
+    for i in 0..list.len(oneof_names)
+        list.push(oneofs, PbOneof { name: oneof_names[i], synthetic: is_synthetic(fields, i) })
+    Ok(PbMessage { name: name, full_name: full, fields: fields, oneofs: oneofs,
+        nested: nested, enums: enums, extensions: extensions, extension_ranges: ext_ranges,
+        reserved_ranges: res_ranges, reserved_names: res_names, map_entry: o.special,
+        deprecated: o.deprecated, unknown: o.unknown })
+
+// A oneof is synthetic when a proto3 `optional` field is its member.
+fn is_synthetic(fields: [PbField], index: Int) -> Bool
+    for f in fields
+        if f.oneof_index == index and f.proto3_optional
+            return true
+    false
+
+fn oneof_name_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<Str, PbDecodeError>
+    var name = ""
+    for it in items(src, off, len, limits)!
+        if it.tag.field == 1
+            name = text(it.value)
+    Ok(name)
+
+// A range with an exclusive end when `exclusive`, as a message's
+// ranges are stored.
+fn range_at(src: Bytes, off: Int, len: Int, exclusive: Bool,
+            limits: PbLimits) -> Result<PbNumberRange, PbDecodeError>
+    var first = 0
+    var end = 0
+    for it in items(src, off, len, limits)!
+        if it.tag.field == 1
+            first = num(it.value)
+        else if it.tag.field == 2
+            end = num(it.value)
+    let last = if exclusive then end - 1 else end
+    Ok(PbNumberRange { first: first, last: last })
+
+fn label_of(n: Int) -> PbLabel
+    match n
+        2 => PbLabelRequired
+        3 => PbLabelRepeated
+        _ => PbLabelOptional
+
+fn field_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<PbField, PbDecodeError>
+    var name = ""
+    var jname = ""
+    var number = 0
+    var label = 1
+    var code = 0
+    var type_name = ""
+    var extendee = ""
+    var oneof = 0 - 1
+    var packed_set = false
+    var packed = false
+    var p3opt = false
+    var default_value = ""
+    var deprecated = false
+    for it in items(src, off, len, limits)!
+        let f = it.tag.field
+        if f == 1
+            name = text(it.value)
+        else if f == 2
+            extendee = text(it.value)
+        else if f == 3
+            number = num(it.value)
+        else if f == 4
+            label = num(it.value)
+        else if f == 5
+            code = num(it.value)
+        else if f == 6
+            type_name = text(it.value)
+        else if f == 7
+            default_value = text(it.value)
+        else if f == 8 and wire_is_bytes(it)
+            let (b, n) = body_of(it)
+            for o in items(src, b, n, limits)!
+                if o.tag.field == 2 and o.tag.wire == PbWireVarint
+                    packed_set = true
+                    packed = flag(o.value)
+                else if o.tag.field == 3 and o.tag.wire == PbWireVarint
+                    deprecated = flag(o.value)
+        else if f == 9
+            oneof = num(it.value)
+        else if f == 10
+            jname = text(it.value)
+        else if f == 17
+            p3opt = flag(it.value)
+    let fallback = if type_name == "" then PbTypeInt32 else PbTypeMessage
+    let t = pbwire.type_of_code(code) ?? fallback
+    let j = if jname == "" then default_json_name(name) else jname
+    Ok(PbField { name: name, json_name: j, number: number, label: label_of(label),
+        field_type: t, type_name: type_name, extendee: extendee, oneof_index: oneof,
+        packed_set: packed_set, packed_value: packed, proto3_optional: p3opt,
+        default_value: default_value, deprecated: deprecated })
+
+fn enum_at(src: Bytes, off: Int, len: Int, scope: Str,
+           limits: PbLimits) -> Result<PbEnum, PbDecodeError>
+    var name = ""
+    var values: [PbEnumValue] = []
+    var o = no_opts()
+    for it in items(src, off, len, limits)!
+        let (b, n) = body_of(it)
+        let f = it.tag.field
+        if f == 1
+            name = text(it.value)
+        else if f == 2 and wire_is_bytes(it)
+            list.push(values, enum_value_at(src, b, n, limits)!)
+        else if f == 3 and wire_is_bytes(it)
+            o = opts_at(src, b, n, 3, 2, limits)!
+    var zero = ""
+    for v in values
+        if v.number == 0 and zero == ""
+            zero = v.name
+    Ok(PbEnum { name: name, full_name: "${scope}.${name}", values: values,
+        allow_alias: o.special, zero_value: zero, deprecated: o.deprecated, unknown: o.unknown })
+
+fn enum_value_at(src: Bytes, off: Int, len: Int,
+                 limits: PbLimits) -> Result<PbEnumValue, PbDecodeError>
+    var name = ""
+    var number = 0
+    var deprecated = false
+    for it in items(src, off, len, limits)!
+        let f = it.tag.field
+        if f == 1
+            name = text(it.value)
+        else if f == 2
+            number = num(it.value)
+        else if f == 3 and wire_is_bytes(it)
+            let (b, n) = body_of(it)
+            deprecated = opts_at(src, b, n, 1, 0, limits)!.deprecated
+    Ok(PbEnumValue { name: name, number: number, deprecated: deprecated })
+
+fn service_at(src: Bytes, off: Int, len: Int, scope: Str,
+              limits: PbLimits) -> Result<PbService, PbDecodeError>
+    var name = ""
+    var methods: [PbMethod] = []
+    var o = no_opts()
+    for it in items(src, off, len, limits)!
+        let (b, n) = body_of(it)
+        let f = it.tag.field
+        if f == 1
+            name = text(it.value)
+        else if f == 2 and wire_is_bytes(it)
+            list.push(methods, method_at(src, b, n, limits)!)
+        else if f == 3 and wire_is_bytes(it)
+            o = opts_at(src, b, n, 33, 0, limits)!
+    Ok(PbService { name: name, full_name: "${scope}.${name}", methods: methods,
+        deprecated: o.deprecated, unknown: o.unknown })
+
+fn method_at(src: Bytes, off: Int, len: Int, limits: PbLimits) -> Result<PbMethod, PbDecodeError>
+    var name = ""
+    var input = ""
+    var output = ""
+    var client = false
+    var server = false
+    var o = no_opts()
+    for it in items(src, off, len, limits)!
+        let f = it.tag.field
+        if f == 1
+            name = text(it.value)
+        else if f == 2
+            input = text(it.value)
+        else if f == 3
+            output = text(it.value)
+        else if f == 4 and wire_is_bytes(it)
+            let (b, n) = body_of(it)
+            o = opts_at(src, b, n, 33, 0, limits)!
+        else if f == 5
+            client = flag(it.value)
+        else if f == 6
+            server = flag(it.value)
+    Ok(PbMethod { name: name, input_type: input, output_type: output,
+        streaming: streaming_of(client, server), deprecated: o.deprecated, unknown: o.unknown })
+
+fn streaming_of(client: Bool, server: Bool) -> PbStreaming
+    if client and server
+        return PbBidiStream
+    if client
+        return PbClientStream
+    if server
+        return PbServerStream
+    PbUnary
+
+// ── writing one ──────────────────────────────────────────────────────
 
 // Write a descriptor set back out as a binary `FileDescriptorSet`.
 //
-// Round-tripping matters because a tool that reads a set, adds a file
-// and writes it is the ordinary way build systems assemble one.  The
-// kept `unknown` fields travel, which is what makes the round trip
-// byte-stable for the options this struct does not name.
+// Fields are written in field-number order, as `protoc` writes them.
+// The kept option fields are written after the named options, so a
+// set read and written again keeps every option this package does not
+// name.
 pub fn write_file_set(set: PbFileSet) -> Result<Bytes, PbEncodeError> []
-    todo("pbdesc.write_file_set")
+    var b = pbwrite.builder(pbwrite.build_limits())
+    for f in set.files
+        b = pbwrite.begin(b, 1)!
+        b = put_file(b, f)!
+        b = pbwrite.end(b)!
+    pbwrite.done(b)
+
+fn put_str(b: PbBuilder, field: Int, s: Str) -> Result<PbBuilder, PbEncodeError>
+    if s == ""
+        return Ok(b)
+    pbwrite.put_string(b, field, s)
+
+fn put_flag(b: PbBuilder, field: Int, v: Bool) -> Result<PbBuilder, PbEncodeError>
+    if not v
+        return Ok(b)
+    pbwrite.put_varint(b, field, 1)
+
+fn put_file(b0: PbBuilder, f: PbFile) -> Result<PbBuilder, PbEncodeError>
+    var b = put_str(b0, 1, f.name)!
+    b = put_str(b, 2, f.package)!
+    for d in f.dependency
+        b = pbwrite.put_string(b, 3, d)!
+    for m in f.messages
+        b = put_message(pbwrite.begin(b, 4)!, m)!
+    for e in f.enums
+        b = put_enum(pbwrite.begin(b, 5)!, e)!
+    for s in f.services
+        b = put_service(pbwrite.begin(b, 6)!, s)!
+    for x in f.extensions
+        b = put_field(pbwrite.begin(b, 7)!, x)!
+    let o = f.options
+    if o.deprecated or o.go_package != "" or o.java_package != "" or pbunknown.count(o.unknown) > 0
+        b = pbwrite.begin(b, 8)!
+        b = put_str(b, 1, o.java_package)!
+        b = put_str(b, 11, o.go_package)!
+        b = put_flag(b, 23, o.deprecated)!
+        b = pbwrite.put_unknown(b, o.unknown)!
+        b = pbwrite.end(b)!
+    for p in f.public_dependency
+        b = pbwrite.put_varint(b, 10, p)!
+    match f.syntax
+        PbProto2         => ()
+        PbProto3         => b = pbwrite.put_string(b, 12, "proto3")!
+        PbSyntaxOther(n) => b = pbwrite.put_string(b, 12, n)!
+    Ok(b)
+
+// Write an options message under `field` when it holds anything.
+fn put_opts(b0: PbBuilder, field: Int, dep_field: Int, dep: Bool, special_field: Int,
+            special: Bool, u: PbUnknownSet) -> Result<PbBuilder, PbEncodeError>
+    if not dep and not special and pbunknown.count(u) == 0
+        return Ok(b0)
+    var b = pbwrite.begin(b0, field)!
+    if dep_field < special_field
+        b = put_flag(b, dep_field, dep)!
+        b = put_flag(b, special_field, special)!
+    else
+        b = put_flag(b, special_field, special)!
+        b = put_flag(b, dep_field, dep)!
+    b = pbwrite.put_unknown(b, u)!
+    pbwrite.end(b)
+
+fn put_range(b0: PbBuilder, field: Int, r: PbNumberRange) -> Result<PbBuilder, PbEncodeError>
+    var b = pbwrite.begin(b0, field)!
+    b = pbwrite.put_varint(b, 1, r.first)!
+    b = pbwrite.put_varint(b, 2, r.last + 1)!
+    pbwrite.end(b)
+
+// Write a message's fields into the open level `b0`, then close it.
+fn put_message(b0: PbBuilder, m: PbMessage) -> Result<PbBuilder, PbEncodeError>
+    var b = put_str(b0, 1, m.name)!
+    for f in m.fields
+        b = put_field(pbwrite.begin(b, 2)!, f)!
+    for n in m.nested
+        b = put_message(pbwrite.begin(b, 3)!, n)!
+    for e in m.enums
+        b = put_enum(pbwrite.begin(b, 4)!, e)!
+    for r in m.extension_ranges
+        b = put_range(b, 5, r)!
+    for x in m.extensions
+        b = put_field(pbwrite.begin(b, 6)!, x)!
+    b = put_opts(b, 7, 3, m.deprecated, 7, m.map_entry, m.unknown)!
+    for o in m.oneofs
+        b = pbwrite.begin(b, 8)!
+        b = pbwrite.put_string(b, 1, o.name)!
+        b = pbwrite.end(b)!
+    for r in m.reserved_ranges
+        b = put_range(b, 9, r)!
+    for n in m.reserved_names
+        b = pbwrite.put_string(b, 10, n)!
+    pbwrite.end(b)
+
+fn label_code(l: PbLabel) -> Int
+    match l
+        PbLabelOptional => 1
+        PbLabelRequired => 2
+        PbLabelRepeated => 3
+
+fn put_field(b0: PbBuilder, f: PbField) -> Result<PbBuilder, PbEncodeError>
+    var b = put_str(b0, 1, f.name)!
+    b = put_str(b, 2, f.extendee)!
+    b = pbwrite.put_varint(b, 3, f.number)!
+    b = pbwrite.put_varint(b, 4, label_code(f.label))!
+    b = pbwrite.put_varint(b, 5, pbwire.type_code(f.field_type))!
+    b = put_str(b, 6, f.type_name)!
+    b = put_str(b, 7, f.default_value)!
+    if f.packed_set or f.deprecated
+        b = pbwrite.begin(b, 8)!
+        if f.packed_set
+            b = pbwrite.put_varint(b, 2, if f.packed_value then 1 else 0)!
+        b = put_flag(b, 3, f.deprecated)!
+        b = pbwrite.end(b)!
+    if f.oneof_index >= 0
+        b = pbwrite.put_varint(b, 9, f.oneof_index)!
+    b = put_str(b, 10, f.json_name)!
+    b = put_flag(b, 17, f.proto3_optional)!
+    pbwrite.end(b)
+
+fn put_enum(b0: PbBuilder, e: PbEnum) -> Result<PbBuilder, PbEncodeError>
+    var b = put_str(b0, 1, e.name)!
+    for v in e.values
+        b = pbwrite.begin(b, 2)!
+        b = put_str(b, 1, v.name)!
+        b = pbwrite.put_varint(b, 2, v.number)!
+        b = put_opts(b, 3, 1, v.deprecated, 0, false, pbunknown.empty())!
+        b = pbwrite.end(b)!
+    b = put_opts(b, 3, 3, e.deprecated, 2, e.allow_alias, e.unknown)!
+    pbwrite.end(b)
+
+fn put_service(b0: PbBuilder, s: PbService) -> Result<PbBuilder, PbEncodeError>
+    var b = put_str(b0, 1, s.name)!
+    for m in s.methods
+        b = pbwrite.begin(b, 2)!
+        b = put_str(b, 1, m.name)!
+        b = put_str(b, 2, m.input_type)!
+        b = put_str(b, 3, m.output_type)!
+        b = put_opts(b, 4, 33, m.deprecated, 0, false, m.unknown)!
+        let client = m.streaming == PbClientStream or m.streaming == PbBidiStream
+        let server = m.streaming == PbServerStream or m.streaming == PbBidiStream
+        b = put_flag(b, 5, client)!
+        b = put_flag(b, 6, server)!
+        b = pbwrite.end(b)!
+    b = put_opts(b, 3, 33, s.deprecated, 0, false, s.unknown)!
+    pbwrite.end(b)
 
 // ── checking one ─────────────────────────────────────────────────────
 
 // Every way this set fails to describe a program, all at once.
 //
-// An empty list is a set a generator will accept.  A long list is a
-// person's afternoon, and handing it over in one go rather than one
-// complaint per run is the difference between a tool and a game.
+// An empty list is a set a generator accepts, as far as the schema
+// goes.  The checks are the ones `descriptor.proto` and the language
+// guide state: every type name resolves, numbers and names are unique,
+// oneof indices are in range, map entries are map entries with a legal
+// key type, proto3 files use no proto2-only construct, and no field
+// uses a reserved number or name.
 //
 // ```novo
 // use pbdesc
@@ -338,7 +831,106 @@ pub fn write_file_set(set: PbFileSet) -> Result<Bytes, PbEncodeError> []
 //     println("${pbdesc.validate(PbFileSet { files: [] }).len()}")   // 0
 // ```
 pub fn validate(set: PbFileSet) -> [PbSchemaError] []
-    todo("pbdesc.validate")
+    var errs: [PbSchemaError] = []
+    for f in set.files
+        match f.syntax
+            PbSyntaxOther(n) => list.push(errs, PbUnknownSyntax(path: f.name, syntax: n))
+            _                => ()
+        let p3 = f.syntax == PbProto3
+        for m in all_messages(f)
+            list.append(errs, check_message(set, m, p3))
+        for e in all_enums(f)
+            list.append(errs, check_enum(e, p3))
+        for x in all_extensions(f)
+            check_type(errs, set, x, dotless(x.extendee) + "." + x.name)
+            if x.extendee != "" and find_message(set, x.extendee) == None
+                list.push(errs, PbUnresolvedTypeName(path: x.name, name: x.extendee))
+    errs
+
+fn dotless(full: Str) -> Str
+    if str.starts_with(full, ".")
+        return str.slice(full, 1, str.len(full))
+    full
+
+fn check_type(var errs: [PbSchemaError], set: PbFileSet, f: PbField, at: Str)
+    match f.field_type
+        PbTypeMessage => if find_message(set, f.type_name) == None
+            list.push(errs, PbUnresolvedTypeName(path: at, name: f.type_name))
+        PbTypeGroup   => if find_message(set, f.type_name) == None
+            list.push(errs, PbUnresolvedTypeName(path: at, name: f.type_name))
+        PbTypeEnum    => if find_enum(set, f.type_name) == None
+            list.push(errs, PbUnresolvedTypeName(path: at, name: f.type_name))
+        _             => ()
+
+fn check_message(set: PbFileSet, m: PbMessage, p3: Bool) -> [PbSchemaError]
+    var errs: [PbSchemaError] = []
+    let mp = dotless(m.full_name)
+    var numbers: [Int] = []
+    var names: [Str] = []
+    for f in m.fields
+        let fp = "${mp}.${f.name}"
+        if list.contains(numbers, f.number)
+            list.push(errs, PbDuplicateFieldNumber(path: mp, field: f.number))
+        list.push(numbers, f.number)
+        if list.contains(names, f.name)
+            list.push(errs, PbDuplicateName(path: mp, name: f.name))
+        list.push(names, f.name)
+        if not pbwire.is_field_number(f.number) or reserved(m, f)
+            list.push(errs, PbReservedInSchema(path: fp, field: f.number))
+        if f.oneof_index >= list.len(m.oneofs)
+            list.push(errs, PbOneofIndexOutOfRange(path: fp, index: f.oneof_index))
+        check_type(errs, set, f, fp)
+        if p3
+            if f.field_type == PbTypeGroup
+                list.push(errs, PbNotInProto3(path: fp, what: "a group"))
+            if f.label == PbLabelRequired
+                list.push(errs, PbNotInProto3(path: fp, what: "a required field"))
+            if f.default_value != ""
+                list.push(errs, PbNotInProto3(path: fp, what: "a default value"))
+    if m.map_entry
+        check_map_entry(errs, m, mp)
+    errs
+
+fn reserved(m: PbMessage, f: PbField) -> Bool
+    for r in m.reserved_ranges
+        if f.number >= r.first and f.number <= r.last
+            return true
+    list.contains(m.reserved_names, f.name)
+
+fn check_map_entry(var errs: [PbSchemaError], m: PbMessage, mp: Str)
+    let ok = list.len(m.fields) == 2 and m.fields[0].number == 1 and m.fields[1].number == 2
+        and m.fields[0].label != PbLabelRepeated and m.fields[1].label != PbLabelRepeated
+    if not ok
+        list.push(errs, PbBadMapEntry(path: mp))
+        return
+    let k = m.fields[0].field_type
+    let bad = match k
+        PbTypeDouble  => true
+        PbTypeFloat   => true
+        PbTypeBytes   => true
+        PbTypeMessage => true
+        PbTypeGroup   => true
+        PbTypeEnum    => true
+        _             => false
+    if bad
+        list.push(errs, PbBadMapKeyType(path: "${mp}.${m.fields[0].name}",
+            type_name: pbwire.type_proto_name(k)))
+
+fn check_enum(e: PbEnum, p3: Bool) -> [PbSchemaError]
+    var errs: [PbSchemaError] = []
+    let ep = dotless(e.full_name)
+    var numbers: [Int] = []
+    var names: [Str] = []
+    for v in e.values
+        if list.contains(names, v.name)
+            list.push(errs, PbDuplicateName(path: ep, name: v.name))
+        list.push(names, v.name)
+        if list.contains(numbers, v.number) and not e.allow_alias
+            list.push(errs, PbDuplicateFieldNumber(path: ep, field: v.number))
+        list.push(numbers, v.number)
+    if p3 and list.len(e.values) > 0 and e.values[0].number != 0
+        list.push(errs, PbNotInProto3(path: ep, what: "a first enum value other than 0"))
+    errs
 
 // ── looking things up ────────────────────────────────────────────────
 
@@ -346,60 +938,103 @@ pub fn validate(set: PbFileSet) -> [PbSchemaError] []
 // included.
 //
 // The name carries its leading dot, `.acme.Order`, which is how
-// `PbField.type_name` writes it — so a lookup from a field is the
-// field's own string and no surgery.
+// `PbField.type_name` writes it.
 pub fn find_message(set: PbFileSet, full_name: Str) -> ?PbMessage []
-    todo("pbdesc.find_message")
+    for f in set.files
+        for m in all_messages(f)
+            if m.full_name == full_name
+                return Some(m)
+    None
 
-// The enum a fully-qualified name points at.
+// The enum a fully-qualified name points at, nested enums included.
 pub fn find_enum(set: PbFileSet, full_name: Str) -> ?PbEnum []
-    todo("pbdesc.find_enum")
+    for f in set.files
+        for e in all_enums(f)
+            if e.full_name == full_name
+                return Some(e)
+    None
 
 // The service a fully-qualified name points at.
 pub fn find_service(set: PbFileSet, full_name: Str) -> ?PbService []
-    todo("pbdesc.find_service")
+    for f in set.files
+        for s in f.services
+            if s.full_name == full_name
+                return Some(s)
+    None
 
 // The method a service declares under this name.
 pub fn find_method(s: PbService, name: Str) -> ?PbMethod []
-    todo("pbdesc.find_method")
+    for m in s.methods
+        if m.name == name
+            return Some(m)
+    None
 
 // The field with this number, or `None`.
-//
-// What a decoder calls once per field it reads, so it is the hot
-// lookup in every dynamic path.
 pub fn field_by_number(m: PbMessage, number: Int) -> ?PbField []
-    todo("pbdesc.field_by_number")
+    for f in m.fields
+        if f.number == number
+            return Some(f)
+    None
 
-// The field with this name.
+// The field with this `.proto` name.
 pub fn field_by_name(m: PbMessage, name: Str) -> ?PbField []
-    todo("pbdesc.field_by_name")
+    for f in m.fields
+        if f.name == name
+            return Some(f)
+    None
 
-// The field with this JSON name — which is the `json_name` the
-// descriptor carries, and not the `.proto` name.
+// The field with this JSON name, which is the descriptor's
+// `json_name` and not the `.proto` name.
 pub fn field_by_json_name(m: PbMessage, name: Str) -> ?PbField []
-    todo("pbdesc.field_by_json_name")
+    for f in m.fields
+        if f.json_name == name
+            return Some(f)
+    None
 
-// Every field belonging to the oneof at `index`.
+// Every field of the oneof at `index`, in declaration order.
 pub fn oneof_fields(m: PbMessage, index: Int) -> [PbField] []
-    todo("pbdesc.oneof_fields")
+    var out: [PbField] = []
+    for f in m.fields
+        if f.oneof_index == index
+            list.push(out, f)
+    out
 
-// Every message the set declares, nested ones flattened, in declaration
-// order.
-//
-// What a generator walks.  The tree is the shape the reference has and
-// the list is the shape a generator wants, so both are here rather than
-// every caller writing the same recursion.
+// Every message the file declares, nested ones included, each before
+// the messages nested in it.
 pub fn all_messages(f: PbFile) -> [PbMessage] []
-    todo("pbdesc.all_messages")
+    var out: [PbMessage] = []
+    for m in f.messages
+        flatten(out, m)
+    out
+
+fn flatten(var out: [PbMessage], m: PbMessage)
+    list.push(out, m)
+    for n in m.nested
+        flatten(out, n)
+
+// Every enum the file declares, nested ones included.
+fn all_enums(f: PbFile) -> [PbEnum]
+    var out: [PbEnum] = list.clone(f.enums)
+    for m in all_messages(f)
+        list.append(out, list.clone(m.enums))
+    out
+
+// Every extension the file declares, at the top level and inside
+// messages.
+fn all_extensions(f: PbFile) -> [PbField]
+    var out: [PbField] = list.clone(f.extensions)
+    for m in all_messages(f)
+        list.append(out, list.clone(m.extensions))
+    out
+
+// Whether the file declares an extension anywhere.
+pub fn has_extensions(f: PbFile) -> Bool []
+    list.len(all_extensions(f)) > 0
 
 // ── the rules that are not in any one field ──────────────────────────
 
-// Whether a repeated field is packed: the descriptor's flag when it set
-// one, and the syntax's default when it did not.
-//
-// The two-field `packed_set` / `packed_value` pair exists precisely so
-// that this function can tell "the file said `false`" from "the file
-// said nothing", which in proto3 are opposite answers.
+// Whether a repeated field is packed: the descriptor's flag when it
+// set one, and the syntax's default when it did not.
 //
 // ```novo
 // use pbdesc
@@ -407,54 +1042,59 @@ pub fn all_messages(f: PbFile) -> [PbMessage] []
 // fn main() [io]
 //     let xs = PbField { name: "xs", json_name: "xs", number: 1,
 //         label: PbLabelRepeated, field_type: PbTypeInt32, type_name: "",
-//         oneof_index: 0 - 1, packed_set: false, packed_value: false,
-//         proto3_optional: false, default_value: "", deprecated: false }
-//     let on = pbdesc.packed_of(xs, PbProto3)
-//     println("${on}")   // true
+//         extendee: "", oneof_index: 0 - 1, packed_set: false,
+//         packed_value: false, proto3_optional: false, default_value: "",
+//         deprecated: false }
+//     println("${pbdesc.packed_of(xs, PbProto3)}")   // true
 // ```
 pub fn packed_of(f: PbField, syntax: PbSyntax) -> Bool []
-    todo("pbdesc.packed_of")
+    if f.label != PbLabelRepeated or not pbwire.is_packable(f.field_type)
+        return false
+    if f.packed_set
+        return f.packed_value
+    syntax == PbProto3
 
 // Whether a field can tell "set to the default" from "not set".
 //
-// Every proto2 field has presence.  In proto3 a singular scalar does
-// NOT — a zero and an absent field are the same bytes, which is the
-// change proto3 made and the one that surprises people — unless the
-// field is in a oneof, carries `optional`, or is a message.  A
-// generator emits an `?T` for a field with presence and a `T` for one
-// without, and getting this wrong is how a generated struct loses
-// information.
+// A repeated field has no presence.  A message, a group, a oneof member
+// and a proto3 `optional` field do.  Every other proto2 field does.  A
+// proto3 singular scalar does not: a zero and an absent field are the
+// same bytes.  A file of any other syntax is read by the proto2 rule.
 pub fn has_presence(f: PbField, syntax: PbSyntax) -> Bool []
-    todo("pbdesc.has_presence")
+    if f.label == PbLabelRepeated
+        return false
+    if f.field_type == PbTypeMessage or f.field_type == PbTypeGroup or f.oneof_index >= 0
+        return true
+    syntax != PbProto3
 
 // Whether this field is a `map<K, V>`: repeated, of a message type,
-// and that message is a compiler-generated map entry.
-//
-// A map is not a wire type.  It is sugar for a repeated message of two
-// fields, and every implementation has to know that; a reader that did
-// not would hand a caller a list of two-field structs and be correct
-// and useless.
+// and that message is a map entry.
 pub fn is_map_field(set: PbFileSet, f: PbField) -> Bool []
-    todo("pbdesc.is_map_field")
+    if f.label != PbLabelRepeated or f.field_type != PbTypeMessage
+        return false
+    match find_message(set, f.type_name)
+        Some(m) => m.map_entry
+        None    => false
 
-// The key field of a map field's entry message: field number 1.
-//
-// `None` when the field is not a map.  A map key may be any integral
-// type, `bool` or `string`, and nothing else — `validate` is where a
-// set that says otherwise is refused.
+// The key field of a map field's entry message: its field numbered 1,
+// or `None` when the field is not a map.
 pub fn map_key_field(set: PbFileSet, f: PbField) -> ?PbField []
-    todo("pbdesc.map_key_field")
+    entry_field(set, f, 1)
 
-// The value field of a map field's entry message: field number 2.
+// The value field of a map field's entry message: its field numbered
+// 2, or `None` when the field is not a map.
 pub fn map_value_field(set: PbFileSet, f: PbField) -> ?PbField []
-    todo("pbdesc.map_value_field")
+    entry_field(set, f, 2)
 
-// The JSON name protobuf derives from a `.proto` name: lower camel
-// case, with each underscore removed and the letter after it upper
-// cased.
-//
-// `unit_price` becomes `unitPrice`.  Used when a descriptor carries no
-// `json_name`, which older ones do not.
+fn entry_field(set: PbFileSet, f: PbField, number: Int) -> ?PbField
+    if not is_map_field(set, f)
+        return None
+    match find_message(set, f.type_name)
+        Some(m) => field_by_number(m, number)
+        None    => None
+
+// The JSON name protobuf derives from a `.proto` name: each underscore
+// removed and the letter after it upper-cased, as `protoc` does.
 //
 // ```novo
 // use pbdesc
@@ -463,18 +1103,39 @@ pub fn map_value_field(set: PbFileSet, f: PbField) -> ?PbField []
 //     println(pbdesc.default_json_name("unit_price"))   // unitPrice
 // ```
 pub fn default_json_name(name: Str) -> Str []
-    todo("pbdesc.default_json_name")
+    var out = ""
+    var upper = false
+    for i in 0..str.len(name)
+        let c = str.byte_at_or(name, i, 0)
+        if c == '_'
+            upper = true
+        else if upper and c >= 'a' and c <= 'z'
+            out = out + str.from_byte(c - 32)
+            upper = false
+        else
+            out = out + str.from_byte(c)
+            upper = false
+    out
 
-// Whether a name is one of the thirteen well-known types — `.google.
-// protobuf.Timestamp`, `.google.protobuf.Duration`, `.google.protobuf.
-// Any`, the wrappers, `Empty`, `Struct`, `Value`, `ListValue`,
-// `FieldMask`.
+// Whether a name is one of the well-known types that protobuf ships
+// beside `descriptor.proto`: `Any`, `Duration`, `Empty`, `FieldMask`,
+// `Struct` with `Value`, `ListValue` and `NullValue`, `Timestamp`, the
+// nine wrappers, and the types of `api.proto`, `type.proto` and
+// `source_context.proto`.
 //
-// They are ordinary messages on the wire and the generator emits them
-// as ordinary structs; this function exists so that a caller who wants
-// to map `Timestamp` onto calendar-nv's civil types can find them.
-// Doing that mapping is NOT this package's job — a `core` package has
-// no calendar, and a generator that quietly changed a field's type
-// would produce code nobody can match to the `.proto` file.
+// They are ordinary messages on the wire, and the generator emits them
+// as ordinary structs.  This function lets a caller that wants to map
+// `Timestamp` onto a calendar type find them.
 pub fn is_well_known(full_name: Str) -> Bool []
-    todo("pbdesc.is_well_known")
+    let prefix = ".google.protobuf."
+    if not str.starts_with(full_name, prefix)
+        return false
+    let rest = str.slice(full_name, str.len(prefix), str.len(full_name))
+    list.contains(well_known_names(), rest)
+
+fn well_known_names() -> [Str]
+    ["Any", "Api", "Method", "Mixin", "BoolValue", "BytesValue", "DoubleValue",
+     "FloatValue", "Int32Value", "Int64Value", "StringValue", "UInt32Value",
+     "UInt64Value", "Duration", "Empty", "FieldMask", "SourceContext", "Struct",
+     "Value", "ListValue", "NullValue", "Timestamp", "Type", "Field", "Enum",
+     "EnumValue", "Option", "Syntax"]

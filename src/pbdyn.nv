@@ -1,72 +1,57 @@
 // pbdyn — a message addressed by field number, over a descriptor read
 // at run time.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
+// Three kinds of program need this, and none of them can use generated
+// code.  A gRPC client driven by reflection builds a request from a
+// descriptor the server handed it moments ago.  A proxy that routes on
+// one field reads it from a message whose other fields it must pass on
+// untouched.  A tool that prints messages, such as a log viewer or a
+// queue browser, meets message types it was not built with.
 //
-// WHO NEEDS THIS.  Three programs, and all three are ones nobody can
-// generate code for:
+// It is not the fast path.  Every field costs a descriptor lookup and
+// every value an allocation, and `encoded_len` encodes to count.
+// Generated code, from `pbgen`, is what a service uses.
 //
-//   A gRPC client driven by reflection — `grpcurl`'s job.  The service
-//   describes itself, the client builds a request from a descriptor it
-//   was handed thirty milliseconds ago, and there was never a `.proto`
-//   file on this machine.
+// A `PbDynamic` keeps its unknown fields as every reader here does, so
+// a proxy that decodes, changes one field and encodes again sends on
+// everything it received.
 //
-//   A proxy that routes on a field.  It has to read field 3 of a
-//   message whose other fields it must not touch and must not lose.
-//
-//   A tool that prints a message.  A log viewer, a queue browser, a
-//   test fixture differ.
-//
-// WHAT IT IS NOT.  It is not the fast path and it does not pretend to
-// be: every field costs a descriptor lookup and every value costs an
-// allocation.  Generated structs are what a service should use, and
-// `pbgen` is where they come from.
-//
-// THE RAW HALF IS STILL THERE.  A `PbDynamic` keeps its unknown fields
-// like every other reader here, so a proxy that decodes, changes one
-// field and re-encodes sends everything it received.  That is the
-// property the whole design exists for; anything else would be a
-// pretty printer.
-//
-// SIXTY-FOUR UNSIGNED BITS DO NOT FIT A novo-lang `Int`.  `uint64` and
-// `fixed64` at or above 2^63 come back as the same sixty-four bits read
-// as a negative `Int`.  Nothing is lost — it is the same bit pattern,
-// and re-encoding it writes the same bytes — but printing one without
-// `uint64_text` prints the wrong number, so the function is here and
-// the README says it in the limits section.
+// A novo-lang `Int` is sixty-four bits and signed.  A `uint64` or
+// `fixed64` at or above 2^63 is held as the negative `Int` with the
+// same bits.  Nothing is lost, since encoding writes the same bytes,
+// but printing one needs `uint64_text`.
 
+use std.bytes
+use zigzag
+use pbwire
+use pbread
+use pbunknown
+use pbwrite
 use pbdesc
 
-// One value of one field, typed by the descriptor rather than by the
-// wire.
-//
-// The variants that carry a number carry it as a novo-lang `Int`, which
-// is signed and sixty-four bits: see the note above for what that means
-// for `uint64`.
+// One value of one field, typed by the descriptor.
 pub enum PbValue
-    // Any of the eight varint types, and the two signed fixed widths.
+    // Any integral type: the eight varint types and the four fixed-width
+    // integer types.
     PbNum(v: Int)
     // `double` and `float`.
     PbReal(v: Float)
     // `bool`.
     PbFlag(v: Bool)
-    // `string`.  UTF-8 by the time it is here: `decode` refuses bytes
-    // that are not.
+    // `string`.  A decoded one is UTF-8 unless the limits turned the
+    // check off.
     PbText(v: Str)
     // `bytes`.
     PbOctets(v: Bytes)
-    // An enum's number, and the name the descriptor gives it — or `""`
-    // when the descriptor has no name for it, which proto3's open enums
-    // make an ordinary case rather than an error.
+    // An enum value's number, and the name the descriptor gives it, or
+    // `""` when the descriptor has none.  proto3's open enums make an
+    // unnamed number an ordinary case.
     PbEnumOf(number: Int, name: Str)
     // A submessage, or a group.
     PbNested(m: PbDynamic)
     // A repeated field's elements, in wire order.
     PbList(items: [PbValue])
-    // A map field's entries, in wire order.  Protobuf's maps have no
-    // order on the wire and this one is the order the bytes arrived in,
-    // which is what makes a re-encode byte-stable.
+    // A map field's entries, in the order they arrived.
     PbMap(entries: [PbMapEntry])
 
 // One entry of a map field.
@@ -74,20 +59,21 @@ pub struct PbMapEntry
     key: PbValue
     value: PbValue
 
-// One field that is set, and what it is set to.
+// One field that is set, and its value.
 pub struct PbSetField
     number: Int
     value: PbValue
 
-// A message: which type it is, which of its fields are set, and what
-// arrived that its type does not declare.
+// A message: its type, the fields that are set, and what arrived that
+// its type does not declare.
 pub struct PbDynamic
-    // The fully-qualified name, leading dot included: `.acme.Order`.
+    // The fully-qualified type name, leading dot included:
+    // `.acme.Order`.
     type_name: Str
     // In the order the fields were set, which for a decoded message is
-    // the order they arrived.
+    // the order of their first arrival.
     fields: [PbSetField]
-    // What this program did not recognise, kept whole.
+    // The fields this program did not recognise, kept whole.
     unknown: PbUnknownSet
 
 // An empty message of this type.
@@ -100,125 +86,620 @@ pub struct PbDynamic
 //     println("${pbdyn.set_numbers(m).len()}")   // 0
 // ```
 pub fn message(type_name: Str) -> PbDynamic []
-    todo("pbdyn.message")
+    PbDynamic { type_name: type_name, fields: [], unknown: pbunknown.empty() }
 
-// ── reading and writing ──────────────────────────────────────────────
+// ── reading ──────────────────────────────────────────────────────────
+
+// The syntax of the file that declares a message.
+fn syntax_of(set: PbFileSet, full_name: Str) -> PbSyntax
+    for f in set.files
+        for m in pbdesc.all_messages(f)
+            if m.full_name == full_name
+                return f.syntax
+    PbProto2
 
 // Decode bytes as the named message type.
 //
-// `PbNoSuchType` when the set does not declare it — which is a
-// `PbSchemaError` shape and is answered here as a decode refusal,
-// because a caller decoding bytes is in the decode path and should not
-// have to match two error types to find out what went wrong.
+// Fields are read as `pbread` reads them and typed by the descriptor.
+// A field whose number the type does not declare, or whose wire type
+// does not match its declared type, is kept in `unknown`.  A packable
+// repeated field is read packed or not.  A repeated submessage field
+// appends, a singular one merges, and a oneof keeps its last member.  A
+// proto3 scalar without presence that arrives as its zero value is not
+// set.  `PbNoSuchType` when the set does not declare the type.
 pub fn decode(set: PbFileSet, full_name: Str, src: Bytes,
               limits: PbLimits) -> Result<PbDynamic, PbDecodeError> []
-    todo("pbdyn.decode")
+    let Some(md) = pbdesc.find_message(set, full_name) else return Err(PbNoSuchType(at: 0, name: full_name))
+    let n = bytes.len(src)
+    if n > limits.max_message
+        return Err(PbMessageTooLarge(at: 0, len: n, limit: limits.max_message))
+    decode_range(set, md, src, 0, n, limits, 0)
 
-// Encode a message, unknown fields included, in field order.
+fn decode_range(set: PbFileSet, md: PbMessage, src: Bytes, off: Int, len: Int,
+                limits: PbLimits, depth: Int) -> Result<PbDynamic, PbDecodeError>
+    if depth > limits.max_depth
+        return Err(PbDepthExceeded(at: off, limit: limits.max_depth))
+    let syntax = syntax_of(set, md.full_name)
+    let evs = pbread.walk_range(src, off, len, limits)!
+    var m = message(md.full_name)
+    var i = 0
+    while i < list.len(evs)
+        match evs[i]
+            PbFieldSeen(t, v, at, raw_len) =>
+                let raw = bytes.slice(src, at, at + raw_len)
+                let start = at + raw_len - payload_len(v)
+                m = take(set, md, syntax, m, t, v, raw, start, limits, depth)!
+                i = i + 1
+            PbGroupStart(f, at)            =>
+                let j = group_end(evs, i)
+                let end_at = event_at(evs[j])
+                let key = pbwire.key_len(pbwire.tag(f, PbWireStartGroup))
+                let close = end_at + pbwire.key_len(pbwire.tag(f, PbWireEndGroup))
+                let t = pbwire.tag(f, PbWireStartGroup)
+                match pbdesc.field_by_number(md, f)
+                    Some(fd) if fd.field_type == PbTypeGroup =>
+                        let sub = group_type(set, fd, at)!
+                        let g = decode_range(set, sub, src, at + key, end_at - at - key, limits, depth + 1)!
+                        m = store(set, md, syntax, m, fd, [PbNested(m: g)])
+                    _ =>
+                        m = keep(m, t, bytes.slice(src, at, close))
+                i = j + 1
+            PbGroupEnd(_, _)               => i = i + 1
+    Ok(m)
+
+fn group_type(set: PbFileSet, fd: PbField, at: Int) -> Result<PbMessage, PbDecodeError>
+    let Some(sub) = pbdesc.find_message(set, fd.type_name) else return Err(PbNoSuchType(at: at, name: fd.type_name))
+    Ok(sub)
+
+fn payload_len(v: PbRaw) -> Int
+    match v
+        PbRawBytes(d) => bytes.len(d)
+        _             => 0
+
+fn event_at(ev: PbEvent) -> Int
+    match ev
+        PbFieldSeen(_, _, at, _) => at
+        PbGroupStart(_, at)      => at
+        PbGroupEnd(_, at)        => at
+
+// The index of the event that closes the group opened at `i`.
+fn group_end(evs: [PbEvent], i: Int) -> Int
+    var depth = 0
+    var j = i
+    while j < list.len(evs)
+        match evs[j]
+            PbGroupStart(_, _) => depth = depth + 1
+            PbGroupEnd(_, _)   =>
+                depth = depth - 1
+                if depth == 0
+                    return j
+            _                  => ()
+        j = j + 1
+    j
+
+// Take one arrived field into `m`.
+fn take(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m0: PbDynamic, t: PbTag, v: PbRaw,
+        raw: Bytes, start: Int, limits: PbLimits, depth: Int) -> Result<PbDynamic, PbDecodeError>
+    var m = m0
+    let Some(fd) = pbdesc.field_by_number(md, t.field) else return Ok(keep(m, t, raw))
+    let packed = fd.label == PbLabelRepeated and pbwire.is_packable(fd.field_type) and t.wire == PbWireBytes
+    if not packed and t.wire != pbwire.wire_for(fd.field_type)
+        return Ok(keep(m, t, raw))
+    var values: [PbValue] = []
+    if packed
+        for r in pbread.unpack(raw_data(v), fd.field_type)!
+            list.push(values, scalar(set, fd, r))
+    else
+        list.push(values, value_of(set, fd, v, start, limits, depth)!)
+    Ok(store(set, md, syntax, m, fd, values))
+
+fn keep(m: PbDynamic, t: PbTag, raw: Bytes) -> PbDynamic
+    PbDynamic { type_name: m.type_name, fields: m.fields, unknown: pbunknown.keep(m.unknown, t, raw) }
+
+fn raw_data(v: PbRaw) -> readonly Bytes
+    match v
+        PbRawBytes(d) => d
+        _             => bytes.zeros(0)
+
+fn raw_bits(v: PbRaw) -> Int
+    match v
+        PbRawVarint(b)  => b
+        PbRawFixed64(b) => b
+        PbRawFixed32(b) => b
+        PbRawBytes(_)   => 0
+
+// A scalar of a varint or fixed-width type, from its raw bits.
+fn scalar(set: PbFileSet, fd: PbField, v: PbRaw) -> PbValue
+    let b = raw_bits(v)
+    match fd.field_type
+        PbTypeDouble   => PbReal(v: float.from_bits(b))
+        PbTypeFloat    => PbReal(v: pbwire.float_of_bits32(b))
+        PbTypeInt32    => PbNum(v: pbwire.int32_of_wire(b))
+        PbTypeSfixed32 => PbNum(v: pbwire.int32_of_wire(b))
+        PbTypeUint32   => PbNum(v: b & 0xffffffff)
+        PbTypeSint32   => PbNum(v: zigzag.decode32(b))
+        PbTypeSint64   => PbNum(v: zigzag.decode64(b))
+        PbTypeBool     => PbFlag(v: b != 0)
+        PbTypeEnum     => enum_value(set, fd, pbwire.int32_of_wire(b))
+        _              => PbNum(v: b)
+
+fn enum_value(set: PbFileSet, fd: PbField, n: Int) -> PbValue
+    var name = ""
+    match pbdesc.find_enum(set, fd.type_name)
+        Some(e) =>
+            for ev in e.values
+                if ev.number == n and name == ""
+                    name = ev.name
+        None    => ()
+    PbEnumOf(number: n, name: name)
+
+// The value of one arrived field whose wire type matches its type.
+fn value_of(set: PbFileSet, fd: PbField, v: PbRaw, start: Int, limits: PbLimits,
+            depth: Int) -> Result<PbValue, PbDecodeError>
+    match fd.field_type
+        PbTypeString  =>
+            let d = raw_data(v)
+            if limits.check_utf8
+                let bad = pbwire.first_non_utf8(d, 0, bytes.len(d))
+                if bad >= 0
+                    return Err(PbNotUtf8(at: start + bad, byte: bytes.byte_at(d, bad) ?? 0))
+            Ok(PbText(v: bytes.to_str(d)))
+        PbTypeBytes   => Ok(PbOctets(v: raw_data(v)))
+        PbTypeMessage =>
+            let Some(sub) = pbdesc.find_message(set, fd.type_name) else return Err(PbNoSuchType(at: start, name: fd.type_name))
+            let n = decode_nested(set, sub, raw_data(v), start, limits, depth + 1)!
+            Ok(PbNested(m: n))
+        _             => Ok(scalar(set, fd, v))
+
+// A submessage's bytes decoded with offsets counted in the outer
+// message.
+fn decode_nested(set: PbFileSet, md: PbMessage, data: Bytes, start: Int, limits: PbLimits,
+                 depth: Int) -> Result<PbDynamic, PbDecodeError>
+    let pad = bytes.concat([bytes.zeros(start), data])
+    decode_range(set, md, pad, start, bytes.len(data), limits, depth)
+
+// Store decoded values into their field.
+fn store(set: PbFileSet, md: PbMessage, syntax: PbSyntax, m: PbDynamic, fd: PbField,
+         values: [PbValue]) -> PbDynamic
+    if pbdesc.is_map_field(set, fd)
+        var entries: [PbMapEntry] = []
+        match get(m, fd.number)
+            Some(PbMap(old)) => list.append(entries, list.clone(old))
+            _                => ()
+        for v in values
+            list.push(entries, entry_of(set, fd, v))
+        return set_field(m, fd.number, PbMap(entries: entries))
+    if fd.label == PbLabelRepeated
+        var items: [PbValue] = []
+        match get(m, fd.number)
+            Some(PbList(old)) => list.append(items, list.clone(old))
+            _                 => ()
+        list.append(items, list.clone(values))
+        return set_field(m, fd.number, PbList(items: items))
+    let v = values[0]
+    var out = m
+    if fd.oneof_index >= 0
+        for other in pbdesc.oneof_fields(md, fd.oneof_index)
+            if other.number != fd.number
+                out = clear(out, other.number)
+    match (get(out, fd.number), v)
+        (Some(PbNested(a)), PbNested(b)) => return set_field(out, fd.number, PbNested(m: merge(a, b)))
+        _                                => ()
+    if not pbdesc.has_presence(fd, syntax) and is_zero(v)
+        return clear(out, fd.number)
+    set_field(out, fd.number, v)
+
+// A map entry's key and value, each defaulted when absent.
+fn entry_of(set: PbFileSet, fd: PbField, v: PbValue) -> PbMapEntry
+    let kf = pbdesc.map_key_field(set, fd)
+    let vf = pbdesc.map_value_field(set, fd)
+    match v
+        PbNested(e) =>
+            let k = get(e, 1) ?? default_of(set, kf)
+            let val = get(e, 2) ?? default_of(set, vf)
+            PbMapEntry { key: k, value: val }
+        _           => PbMapEntry { key: v, value: v }
+
+// The zero value of a field's type.
+fn default_of(set: PbFileSet, f: ?PbField) -> PbValue
+    let Some(fd) = f else return PbNum(v: 0)
+    match fd.field_type
+        PbTypeDouble  => PbReal(v: 0.0)
+        PbTypeFloat   => PbReal(v: 0.0)
+        PbTypeBool    => PbFlag(v: false)
+        PbTypeString  => PbText(v: "")
+        PbTypeBytes   => PbOctets(v: bytes.zeros(0))
+        PbTypeEnum    => enum_value(set, fd, 0)
+        PbTypeMessage => PbNested(m: message(fd.type_name))
+        PbTypeGroup   => PbNested(m: message(fd.type_name))
+        _             => PbNum(v: 0)
+
+fn is_zero(v: PbValue) -> Bool
+    match v
+        PbNum(n)         => n == 0
+        PbReal(x)        => float.to_bits(x) == 0
+        PbFlag(b)        => not b
+        PbText(s)        => s == ""
+        PbOctets(b)      => bytes.len(b) == 0
+        PbEnumOf(n, _)   => n == 0
+        _                => false
+
+// ── writing ──────────────────────────────────────────────────────────
+
+// Encode a message: its fields in the order they are set, then its
+// unknown fields.
 //
-// The fields are written in the order they are set and the unknown
-// fields last, which is what makes a decode-and-re-encode of an
-// untouched message produce the bytes it started from.
+// A decoded message that nobody changed therefore encodes to the bytes
+// it came from, when those bytes were in field order.  A proto3 scalar
+// without presence that holds its zero value is not written.
+// `PbSchemaRefused` when the value does not fit its descriptor: an
+// undeclared type or field number, or a value of the wrong kind.
 pub fn encode(set: PbFileSet, m: PbDynamic) -> Result<Bytes, PbEncodeError> []
-    todo("pbdyn.encode")
+    encode_depth(set, m, 0)
 
-// How many bytes `encode` will produce, without producing them.
-//
-// The sizing pass `pbwrite` § the length prefix describes, run over a
-// dynamic value rather than a generated one.
+fn refused(e: PbSchemaError) -> Result<Bytes, PbEncodeError>
+    Err(PbSchemaRefused(error: e))
+
+fn encode_depth(set: PbFileSet, m: PbDynamic, depth: Int) -> Result<Bytes, PbEncodeError>
+    if depth > pbwrite.build_limits().max_depth
+        return Err(PbEncodeDepthExceeded(limit: pbwrite.build_limits().max_depth))
+    let Some(md) = pbdesc.find_message(set, m.type_name) else return refused(PbUnresolvedTypeName(path: "", name: m.type_name))
+    let syntax = syntax_of(set, md.full_name)
+    var out = bytes.zeros(0)
+    for sf in m.fields
+        let Some(fd) = pbdesc.field_by_number(md, sf.number) else return refused(PbUndeclaredField(path: path_of(md.full_name), field: sf.number))
+        out = out + field_bytes(set, md, syntax, fd, sf.value, depth)!
+    var c = bytes.cursor_le(bytes.zeros(pbunknown.encoded_len(m.unknown)))
+    let _ = pbunknown.write_into(m.unknown, c)!
+    Ok(out + c.finish())
+
+fn path_of(full: Str) -> Str
+    if str.starts_with(full, ".")
+        return str.slice(full, 1, str.len(full))
+    full
+
+fn field_path(md: PbMessage, fd: PbField) -> Str
+    "${path_of(md.full_name)}.${fd.name}"
+
+fn mismatch(md: PbMessage, fd: PbField, want: Str, v: PbValue) -> Result<Bytes, PbEncodeError>
+    refused(PbKindMismatch(path: field_path(md, fd), want: want, got: value_kind(v)))
+
+// The bytes of one set field, whatever its label.
+fn field_bytes(set: PbFileSet, md: PbMessage, syntax: PbSyntax, fd: PbField, v: PbValue,
+               depth: Int) -> Result<Bytes, PbEncodeError>
+    if pbdesc.is_map_field(set, fd)
+        let PbMap(entries) = v else return mismatch(md, fd, "map", v)
+        let Some(em) = pbdesc.find_message(set, fd.type_name) else return refused(PbUnresolvedTypeName(path: field_path(md, fd), name: fd.type_name))
+        var out = bytes.zeros(0)
+        for e in entries
+            let entry = PbDynamic { type_name: em.full_name,
+                fields: [PbSetField { number: 1, value: e.key }, PbSetField { number: 2, value: e.value }],
+                unknown: pbunknown.empty() }
+            let body = encode_depth(set, entry, depth + 1)!
+            out = out + delimited(fd.number, body)!
+        return Ok(out)
+    if fd.label == PbLabelRepeated
+        let PbList(items) = v else return mismatch(md, fd, "list", v)
+        if pbdesc.packed_of(fd, syntax)
+            return packed(md, fd, items)
+        var out = bytes.zeros(0)
+        for it in items
+            out = out + one_bytes(set, md, fd, it, depth)!
+        return Ok(out)
+    if not pbdesc.has_presence(fd, syntax) and is_zero(v)
+        return Ok(bytes.zeros(0))
+    one_bytes(set, md, fd, v, depth)
+
+// A buffer of `n` bytes behind a cursor.
+fn room(n: Int) -> Cursor
+    bytes.cursor_le(bytes.zeros(n))
+
+fn delimited(field: Int, body: Bytes) -> Result<Bytes, PbEncodeError>
+    var c = room(pbwrite.delimited_field_len(field, bytes.len(body)))
+    let _ = pbwrite.write_message_field(field, body, c)!
+    Ok(c.finish())
+
+// The integer a numeric value holds, or `None` for another kind.
+fn int_of(v: PbValue) -> ?Int
+    match v
+        PbNum(n)       => Some(n)
+        PbEnumOf(n, _) => Some(n)
+        _              => None
+
+// A packed field: every element as the integer or bit pattern
+// `pbwrite.write_packed_field` takes.
+fn packed(md: PbMessage, fd: PbField, items: [PbValue]) -> Result<Bytes, PbEncodeError>
+    let t = fd.field_type
+    var values: [Int] = []
+    for it in items
+        let w = want_of(t)
+        let n = match it
+            PbReal(x) => if t == PbTypeFloat then pbwire.float32_bits(x) else float.to_bits(x)
+            PbFlag(b) => if b then 1 else 0
+            _         => int_of(it) ?? 0
+        if value_kind(it) != w and not (w == "enum" and value_kind(it) == "num")
+            return mismatch(md, fd, w, it)
+        list.push(values, n)
+    var c = room(pbwrite.delimited_field_len(fd.number, pbwrite.packed_payload_len(t, values)))
+    let _ = pbwrite.write_packed_field(fd.number, t, values, c)!
+    Ok(c.finish())
+
+// The kind of value a declared type takes, as `value_kind` names it.
+fn want_of(t: PbFieldType) -> Str
+    match t
+        PbTypeDouble  => "real"
+        PbTypeFloat   => "real"
+        PbTypeBool    => "flag"
+        PbTypeString  => "text"
+        PbTypeBytes   => "octets"
+        PbTypeEnum    => "enum"
+        PbTypeMessage => "nested"
+        PbTypeGroup   => "nested"
+        _             => "num"
+
+// The bytes of one element of a field.
+fn one_bytes(set: PbFileSet, md: PbMessage, fd: PbField, v: PbValue,
+             depth: Int) -> Result<Bytes, PbEncodeError>
+    let n = fd.number
+    let t = fd.field_type
+    match (t, v)
+        (PbTypeDouble, PbReal(x))   =>
+            var c = room(pbwrite.fixed_field_len(n, t))
+            let _ = pbwrite.write_double_field(n, x, c)!
+            Ok(c.finish())
+        (PbTypeFloat, PbReal(x))    =>
+            var c = room(pbwrite.fixed_field_len(n, t))
+            let _ = pbwrite.write_float_field(n, x, c)!
+            Ok(c.finish())
+        (PbTypeBool, PbFlag(b))     =>
+            var c = room(pbwrite.varint_field_len(n, 1))
+            let _ = pbwrite.write_bool_field(n, b, c)!
+            Ok(c.finish())
+        (PbTypeString, PbText(s))   =>
+            var c = room(pbwrite.delimited_field_len(n, str.len(s)))
+            let _ = pbwrite.write_string_field(n, s, c)!
+            Ok(c.finish())
+        (PbTypeBytes, PbOctets(b))  => delimited(n, b)
+        (PbTypeMessage, PbNested(sub)) =>
+            if sub.type_name != fd.type_name
+                return refused(PbKindMismatch(path: field_path(md, fd), want: fd.type_name, got: sub.type_name))
+            delimited(n, encode_depth(set, sub, depth + 1)!)
+        (PbTypeGroup, PbNested(sub))   =>
+            if sub.type_name != fd.type_name
+                return refused(PbKindMismatch(path: field_path(md, fd), want: fd.type_name, got: sub.type_name))
+            let body = encode_depth(set, sub, depth + 1)!
+            var c = room(pbwire.field_len(pbwire.tag(n, PbWireStartGroup), bytes.len(body)))
+            let _ = pbwrite.write_group_field(n, body, c)!
+            Ok(c.finish())
+        _                           =>
+            let w = want_of(t)
+            let Some(x) = int_of(v) else return mismatch(md, fd, w, v)
+            if w != "num" and w != "enum"
+                return mismatch(md, fd, w, v)
+            int_bytes(n, t, x)
+
+fn int_bytes(n: Int, t: PbFieldType, x: Int) -> Result<Bytes, PbEncodeError>
+    match t
+        PbTypeSint32   =>
+            var c = room(pbwrite.sint32_field_len(n, x))
+            let _ = pbwrite.write_sint32_field(n, x, c)!
+            Ok(c.finish())
+        PbTypeSint64   =>
+            var c = room(pbwrite.sint64_field_len(n, x))
+            let _ = pbwrite.write_sint64_field(n, x, c)!
+            Ok(c.finish())
+        PbTypeFixed32  => fixed32(n, x)
+        PbTypeSfixed32 => fixed32(n, x)
+        PbTypeFixed64  => fixed64(n, x)
+        PbTypeSfixed64 => fixed64(n, x)
+        _              =>
+            if not in_range(t, x)
+                return Err(PbValueOutOfRange(field: n, value: x))
+            var c = room(pbwrite.varint_field_len(n, x))
+            let _ = pbwrite.write_varint_field(n, x, c)!
+            Ok(c.finish())
+
+// Whether a varint type carries `x`: the thirty-two-bit types their
+// range, the sixty-four-bit ones every `Int`.
+fn in_range(t: PbFieldType, x: Int) -> Bool
+    match t
+        PbTypeInt32  => zigzag.fits32(x)
+        PbTypeEnum   => zigzag.fits32(x)
+        PbTypeUint32 => x >= 0 and x <= 0xffffffff
+        _            => true
+
+fn fixed32(n: Int, x: Int) -> Result<Bytes, PbEncodeError>
+    var c = room(pbwrite.fixed_field_len(n, PbTypeFixed32))
+    let _ = pbwrite.write_fixed32_field(n, x, c)!
+    Ok(c.finish())
+
+fn fixed64(n: Int, x: Int) -> Result<Bytes, PbEncodeError>
+    var c = room(pbwrite.fixed_field_len(n, PbTypeFixed64))
+    let _ = pbwrite.write_fixed64_field(n, x, c)!
+    Ok(c.finish())
+
+// How many bytes `encode` produces.  It encodes to count.
 pub fn encoded_len(set: PbFileSet, m: PbDynamic) -> Result<Int, PbEncodeError> []
-    todo("pbdyn.encoded_len")
+    Ok(bytes.len(encode(set, m)!))
 
 // Encode into the caller's buffer, and answer the byte count.
+// `PbBufferTooSmall` before anything is written when it does not fit.
 pub fn encode_into(set: PbFileSet, m: PbDynamic, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    todo("pbdyn.encode_into")
+    let b = encode(set, m)!
+    let n = bytes.len(b)
+    if dst.remaining() < n
+        return Err(PbBufferTooSmall(need: n, left: dst.remaining()))
+    dst.put_bytes(b)
+    Ok(n)
 
 // ── reflection ───────────────────────────────────────────────────────
 
 // The value of the field with this number, or `None` when it is not
 // set.
 //
-// A repeated field answers `PbList` even when one element arrived; a
-// map answers `PbMap`.  Neither ever answers a bare element, because a
-// caller that had to handle both shapes would have a bug the first time
-// a list had one item in it.
+// A repeated field answers `PbList` even with one element, and a map
+// answers `PbMap`, so a caller handles one shape per field.
 pub fn get(m: PbDynamic, number: Int) -> ?PbValue []
-    todo("pbdyn.get")
+    for f in m.fields
+        if f.number == number
+            return Some(f.value)
+    None
 
-// The value of the field with this `.proto` name.
+// The value of the field with this `.proto` name, or `None` when the
+// type declares no such field or it is not set.
 pub fn get_by_name(set: PbFileSet, m: PbDynamic, name: Str) -> ?PbValue []
-    todo("pbdyn.get_by_name")
+    let Some(md) = pbdesc.find_message(set, m.type_name) else return None
+    let Some(fd) = pbdesc.field_by_name(md, name) else return None
+    get(m, fd.number)
 
-// Set a field, replacing whatever was there.
+// A new message with the field set to `v`, replacing what was there.
 //
-// The value is NOT checked against the descriptor here — `type_check`
-// is where that happens, and `encode` runs it.  Separating them is what
-// lets a caller build a message in whatever order it likes and find out
-// once at the end.
+// Nothing is checked against a descriptor here, and the other members
+// of a oneof stay set.  `type_check` and `encode` check the value, and
+// a decoder of the encoded bytes keeps a oneof's last member.
 pub fn set(m: PbDynamic, number: Int, v: PbValue) -> PbDynamic []
-    todo("pbdyn.set")
+    set_field(m, number, v)
 
-// Clear a field.
-//
-// Setting a oneof's member clears the others; this clears one by
-// number, and clearing the one that is set leaves the oneof empty.
+fn set_field(m: PbDynamic, number: Int, v: PbValue) -> PbDynamic
+    var fields: [PbSetField] = []
+    var found = false
+    for f in m.fields
+        if f.number == number
+            list.push(fields, PbSetField { number: number, value: v })
+            found = true
+        else
+            list.push(fields, f)
+    if not found
+        list.push(fields, PbSetField { number: number, value: v })
+    PbDynamic { type_name: m.type_name, fields: fields, unknown: m.unknown }
+
+// A new message without this field.
 pub fn clear(m: PbDynamic, number: Int) -> PbDynamic []
-    todo("pbdyn.clear")
+    var fields: [PbSetField] = []
+    for f in m.fields
+        if f.number != number
+            list.push(fields, f)
+    PbDynamic { type_name: m.type_name, fields: fields, unknown: m.unknown }
 
 // Whether the field is set.
 //
-// For a proto3 singular scalar with implicit presence a zero and an
-// absent field are the same bytes, so this answers false for a field
-// decoded as zero — which is the wire's own answer and not a loss.
-// `pbdesc.has_presence` is how a caller knows which kind of field it
-// is holding.
+// A proto3 scalar without presence that arrived as its zero value is
+// not set, which is what the wire says.
 pub fn has(m: PbDynamic, number: Int) -> Bool []
-    todo("pbdyn.has")
+    get(m, number) != None
 
 // Every field number that is set, in the order they were set.
 pub fn set_numbers(m: PbDynamic) -> [Int] []
-    todo("pbdyn.set_numbers")
+    var out: [Int] = []
+    for f in m.fields
+        list.push(out, f.number)
+    out
 
-// Which member of this oneof is set, by field number, or `None`.
+// Which member of the named oneof is set, by field number, or `None`.
 pub fn which_oneof(set: PbFileSet, m: PbDynamic, oneof_name: Str) -> ?Int []
-    todo("pbdyn.which_oneof")
+    let Some(md) = pbdesc.find_message(set, m.type_name) else return None
+    var index = 0 - 1
+    for i in 0..list.len(md.oneofs)
+        if md.oneofs[i].name == oneof_name
+            index = i
+    var found: ?Int = None
+    for f in m.fields
+        match pbdesc.field_by_number(md, f.number)
+            Some(fd) => if fd.oneof_index == index and index >= 0
+                found = Some(f.number)
+            None     => ()
+    found
 
-// Merge `b` into `a` by protobuf's own merge rule: singular fields of
-// `b` win, repeated fields concatenate, submessages merge recursively,
-// unknown sets concatenate.
+// Merge `b` into `a` by protobuf's rule: a singular field of `b`
+// replaces `a`'s, repeated fields and maps concatenate, submessages
+// merge, and unknown sets concatenate.
 //
-// The rule is not a convenience — it is what concatenating two encoded
-// messages means on the wire, and a decoder that did anything else
-// would disagree with every other implementation about what
-// `encode(a) ++ encode(b)` decodes to.
+// This is what the concatenation of two encoded messages decodes to.
 pub fn merge(a: PbDynamic, b: PbDynamic) -> PbDynamic []
-    todo("pbdyn.merge")
+    var out = PbDynamic { type_name: a.type_name, fields: a.fields,
+        unknown: pbunknown.merge(a.unknown, b.unknown) }
+    for f in b.fields
+        let v = match (get(out, f.number), f.value)
+            (Some(PbList(x)), PbList(y))     => PbList(items: list.concat(x, y))
+            (Some(PbMap(x)), PbMap(y))       => PbMap(entries: list.concat(x, y))
+            (Some(PbNested(x)), PbNested(y)) => PbNested(m: merge(x, y))
+            _                                => f.value
+        out = set_field(out, f.number, v)
+    out
 
-// Every way this value disagrees with its descriptor: a number the type
-// does not declare, a value of the wrong kind, a map key of a type
-// protobuf forbids.
+// Every way this value disagrees with its descriptor: a type the set
+// does not declare, a field number the type does not declare, and a
+// value of the wrong kind, nested messages included.
 //
-// Run by `encode`, and available separately for a tool that wants to
-// tell a person what is wrong before it tries.
+// `encode` refuses the first of these it meets; this answers them all
+// for a tool that tells a person what is wrong.
 pub fn type_check(set: PbFileSet, m: PbDynamic) -> [PbSchemaError] []
-    todo("pbdyn.type_check")
+    var errs: [PbSchemaError] = []
+    check_into(errs, set, m)
+    errs
+
+fn check_into(var errs: [PbSchemaError], set: PbFileSet, m: PbDynamic)
+    let Some(md) = pbdesc.find_message(set, m.type_name) else return push(errs, PbUnresolvedTypeName(path: "", name: m.type_name))
+    for sf in m.fields
+        match pbdesc.field_by_number(md, sf.number)
+            Some(fd) => check_value(errs, set, md, fd, sf.value)
+            None     => list.push(errs, PbUndeclaredField(path: path_of(md.full_name), field: sf.number))
+
+fn push(var errs: [PbSchemaError], e: PbSchemaError)
+    list.push(errs, e)
+
+fn check_value(var errs: [PbSchemaError], set: PbFileSet, md: PbMessage, fd: PbField, v: PbValue)
+    let fp = field_path(md, fd)
+    if pbdesc.is_map_field(set, fd)
+        match v
+            PbMap(entries) =>
+                for e in entries
+                    check_one(errs, set, fp, pbdesc.map_key_field(set, fd), e.key)
+                    check_one(errs, set, fp, pbdesc.map_value_field(set, fd), e.value)
+            _              => list.push(errs, PbKindMismatch(path: fp, want: "map", got: value_kind(v)))
+        return
+    if fd.label == PbLabelRepeated
+        match v
+            PbList(items) =>
+                for it in items
+                    check_one(errs, set, fp, Some(fd), it)
+            _             => list.push(errs, PbKindMismatch(path: fp, want: "list", got: value_kind(v)))
+        return
+    check_one(errs, set, fp, Some(fd), v)
+
+fn check_one(var errs: [PbSchemaError], set: PbFileSet, fp: Str, f: ?PbField, v: PbValue)
+    let Some(fd) = f else return
+    let want = want_of(fd.field_type)
+    let got = value_kind(v)
+    if got == want or (want == "enum" and got == "num")
+        match v
+            PbNested(sub) =>
+                if sub.type_name != fd.type_name
+                    list.push(errs, PbKindMismatch(path: fp, want: fd.type_name, got: sub.type_name))
+                else
+                    check_into(errs, set, sub)
+            _             => ()
+        return
+    list.push(errs, PbKindMismatch(path: fp, want: want, got: got))
 
 // Which of the nine shapes a value is, as a word: `"num"`, `"real"`,
 // `"flag"`, `"text"`, `"octets"`, `"enum"`, `"nested"`, `"list"`,
 // `"map"`.
-//
-// For a refusal's message, and for a test that wants to assert a shape
-// without matching nine arms.
 pub fn value_kind(v: PbValue) -> Str []
-    todo("pbdyn.value_kind")
+    match v
+        PbNum(_)       => "num"
+        PbReal(_)      => "real"
+        PbFlag(_)      => "flag"
+        PbText(_)      => "text"
+        PbOctets(_)    => "octets"
+        PbEnumOf(_, _) => "enum"
+        PbNested(_)    => "nested"
+        PbList(_)      => "list"
+        PbMap(_)       => "map"
 
-// ── the sixty-four-bit unsigned gap, named ───────────────────────────
+// ── the sixty-four-bit unsigned reading ──────────────────────────────
 
 // Render sixty-four bits as the unsigned decimal number they are.
-//
-// `PbNum(0 - 1)` holding a `uint64` is 18446744073709551615, and
-// printing the `Int` would say `-1`.  This is the function that says
-// the other one.
 //
 // ```novo
 // use pbdyn
@@ -227,12 +708,25 @@ pub fn value_kind(v: PbValue) -> Str []
 //     println(pbdyn.uint64_text(0 - 1))   // 18446744073709551615
 // ```
 pub fn uint64_text(bits: Int) -> Str []
-    todo("pbdyn.uint64_text")
+    if bits >= 0
+        return str.from_int(bits)
+    let q = (bits >>> 1) / 5
+    let r = int.wrapping_sub(bits, int.wrapping_mul(q, 10))
+    str.from_int(q) + str.from_int(r)
 
 // The sixty-four bits an unsigned decimal number names, or `None` when
-// the text is not a number below 2^64.
-//
-// The inverse of `uint64_text`, so a tool that read a number out of
-// JSON can put it in a `PbNum` without losing the top bit.
+// the text is empty, holds anything but the digits 0 to 9, or names a
+// number of 2^64 or more.
 pub fn uint64_of_text(s: Str) -> ?Int []
-    todo("pbdyn.uint64_of_text")
+    let n = str.len(s)
+    if n == 0
+        return None
+    var v = 0
+    for i in 0..n
+        let d = str.byte_at_or(s, i, 0) - '0'
+        if d < 0 or d > 9
+            return None
+        if v > 1844674407370955161 or (v == 1844674407370955161 and d > 5)
+            return None
+        v = int.wrapping_add(int.wrapping_mul(v, 10), d)
+    Some(v)
