@@ -301,13 +301,14 @@ fn encode_depth(set: PbFileSet, m: PbDynamic, depth: Int) -> Result<Bytes, PbEnc
         return Err(PbEncodeDepthExceeded(limit: pbwrite.build_limits().max_depth))
     let Some(md) = pbdesc.find_message(set, m.type_name) else return refused(PbUnresolvedTypeName(path: "", name: m.type_name))
     let syntax = syntax_of(set, md.full_name)
-    var out = bytes.zeros(0)
+    var parts: [Bytes] = []
     for sf in m.fields
         let Some(fd) = pbdesc.field_by_number(md, sf.number) else return refused(PbUndeclaredField(path: path_of(md.full_name), field: sf.number))
-        out = out + field_bytes(set, md, syntax, fd, sf.value, depth)!
+        list.push(parts, field_bytes(set, md, syntax, fd, sf.value, depth)!)
     var c = bytes.cursor_le(bytes.zeros(pbunknown.encoded_len(m.unknown)))
     let _ = pbunknown.write_into(m.unknown, c)!
-    Ok(out + c.finish())
+    list.push(parts, c.finish())
+    Ok(bytes.concat(parts))
 
 fn path_of(full: Str) -> Str
     if str.starts_with(full, ".")
@@ -326,22 +327,21 @@ fn field_bytes(set: PbFileSet, md: PbMessage, syntax: PbSyntax, fd: PbField, v: 
     if pbdesc.is_map_field(set, fd)
         let PbMap(entries) = v else return mismatch(md, fd, "map", v)
         let Some(em) = pbdesc.find_message(set, fd.type_name) else return refused(PbUnresolvedTypeName(path: field_path(md, fd), name: fd.type_name))
-        var out = bytes.zeros(0)
+        var parts: [Bytes] = []
         for e in entries
             let entry = PbDynamic { type_name: em.full_name,
                 fields: [PbSetField { number: 1, value: e.key }, PbSetField { number: 2, value: e.value }],
                 unknown: pbunknown.empty() }
-            let body = encode_depth(set, entry, depth + 1)!
-            out = out + delimited(fd.number, body)!
-        return Ok(out)
+            list.push(parts, delimited(fd.number, encode_depth(set, entry, depth + 1)!)!)
+        return Ok(bytes.concat(parts))
     if fd.label == PbLabelRepeated
         let PbList(items) = v else return mismatch(md, fd, "list", v)
         if pbdesc.packed_of(fd, syntax)
             return packed(md, fd, items)
-        var out = bytes.zeros(0)
+        var parts: [Bytes] = []
         for it in items
-            out = out + one_bytes(set, md, fd, it, depth)!
-        return Ok(out)
+            list.push(parts, one_bytes(set, md, fd, it, depth)!)
+        return Ok(bytes.concat(parts))
     if not pbdesc.has_presence(fd, syntax) and is_zero(v)
         return Ok(bytes.zeros(0))
     one_bytes(set, md, fd, v, depth)
