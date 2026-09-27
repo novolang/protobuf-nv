@@ -1,0 +1,242 @@
+// tests/gen_tests.nv — the generator's refusals, its naming rules at
+// their edges, its options, and the last descriptor and dynamic
+// branches.
+//
+// tools/roundtrip.py builds the generated code and checks it against
+// Google's protobuf module; this suite checks the text.
+
+use std.test
+use std.bytes
+use pbwire
+use pbread
+use pbunknown
+use pbdesc
+use pbdyn
+use pbgen
+use pberr
+
+fn hex(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+fn fld(name: Str, number: Int, label: PbLabel, t: PbFieldType, type_name: Str) -> PbField
+    PbField { name: name, json_name: name, number: number, label: label, field_type: t,
+        type_name: type_name, extendee: "", oneof_index: 0 - 1, packed_set: false,
+        packed_value: false, proto3_optional: false, default_value: "", deprecated: false }
+
+fn msg(full: Str, fields: [PbField], extensions: [PbField]) -> PbMessage
+    let parts = str.split(full, ".")
+    PbMessage { name: parts[list.len(parts) - 1], full_name: full, fields: fields, oneofs: [],
+        nested: [], enums: [], extensions: extensions, extension_ranges: [], reserved_ranges: [],
+        reserved_names: [], map_entry: false, deprecated: false, unknown: pbunknown.empty() }
+
+fn file(name: Str, syntax: PbSyntax, messages: [PbMessage], enums: [PbEnum]) -> PbFile
+    PbFile { name: name, package: "t", syntax: syntax, dependency: [], public_dependency: [],
+        messages: messages, enums: enums, services: [], extensions: [],
+        options: PbFileOptions { deprecated: false, go_package: "", java_package: "",
+            unknown: pbunknown.empty() } }
+
+fn first_refusal(f: PbFile) -> Str
+    match pbgen.generate_set(PbFileSet { files: [f] }, pbgen.default_options())
+        Ok(_)  => "none"
+        Err(e) => e.message()
+
+// ── refusals ────────────────────────────────────────────────────────
+
+@test
+fn test_a_set_that_does_not_validate_is_not_generated()
+    let m = msg(".t.M", [fld("a", 1, PbLabelOptional, PbTypeMessage, ".t.Nope")], [])
+    test.assert_eq(str.contains(first_refusal(file("u.proto", PbProto3, [m], [])), ".t.Nope"), true)
+
+@test
+fn test_a_module_name_the_standard_library_uses_is_refused()
+    test.assert_eq(str.contains(first_refusal(file("json.proto", PbProto3, [], [])), "json"), true)
+
+@test
+fn test_an_extension_inside_a_message_is_refused()
+    let x = PbField { name: "x", json_name: "x", number: 100, label: PbLabelOptional,
+        field_type: PbTypeInt32, type_name: "", extendee: ".t.M", oneof_index: 0 - 1,
+        packed_set: false, packed_value: false, proto3_optional: false, default_value: "",
+        deprecated: false }
+    let m = msg(".t.M", [], [x])
+    let errs = pbgen.refusals(file("x.proto", PbProto2, [m], []))
+    test.assert_eq(errs.len(), 1)
+    test.assert_eq(errs[0] == PbNotGenerated(path: "t.M.x", what: "an extension"), true)
+
+@test
+fn test_two_protobuf_names_that_fold_to_one_novo_name_are_refused()
+    let a = msg(".t.A_b", [], [])
+    let b = msg(".t.AB", [], [])
+    let errs = pbgen.refusals(file("c.proto", PbProto3, [a, b], []))
+    test.assert_eq(errs.len(), 1)
+    test.assert_eq(errs[0] == PbDuplicateName(path: "t.AB", name: "TAB"), true)
+    let fields = msg(".t.F", [fld("loop", 1, PbLabelOptional, PbTypeInt32, ""),
+        fld("loop_", 2, PbLabelOptional, PbTypeInt32, ""),
+        fld("unknown", 3, PbLabelOptional, PbTypeInt32, "")], [])
+    let more = pbgen.refusals(file("f.proto", PbProto3, [fields], []))
+    test.assert_eq(more.len(), 2)
+    test.assert_eq(more[1] == PbDuplicateName(path: "t.F", name: "unknown"), true)
+    let own = msg(".PbField", [], [])
+    test.assert_eq(pbgen.refusals(file("o.proto", PbProto3, [own], [])).len(), 1)
+
+// ── the naming rules at their edges ─────────────────────────────────
+
+@test
+fn test_names_fold_underscores_and_cases()
+    test.assert_eq(pbgen.novo_type_name(".my_pkg.v1.Foo_bar"), "MyPkgV1FooBar")
+    test.assert_eq(pbgen.novo_type_name("acme.Order"), "AcmeOrder")
+    test.assert_eq(pbgen.novo_module_name("Acme/v1-beta/Order.proto"), "acme_v1_beta_order")
+    test.assert_eq(pbgen.novo_module_name("notes"), "notes")
+    test.assert_eq(pbgen.encode_fn_name(".acme.HTTPServer"), "encode_acme_http_server")
+    test.assert_eq(pbgen.decode_fn_name(".acme.Order2x"), "decode_acme_order2x")
+    test.assert_eq(pbgen.new_fn_name(".acme.My_Order"), "new_acme_my_order")
+    test.assert_eq(pbgen.write_fn_name(".acme.Order"), "write_acme_order")
+
+@test
+fn test_enum_variants_strip_their_prefix_only_when_something_is_left()
+    test.assert_eq(pbgen.novo_variant_name(".t.Currency", "CURRENCY_EURO_ZONE"), "TCurrencyEuroZone")
+    test.assert_eq(pbgen.novo_variant_name(".t.Currency", "CURRENCY_"), "TCurrencyCurrency")
+    test.assert_eq(pbgen.novo_variant_name(".t.Currency", "CURRENCY_2X"), "TCurrencyCurrency2x")
+    test.assert_eq(pbgen.novo_variant_name(".t.HttpCode", "HTTP_CODE_OK"), "THttpCodeOk")
+    test.assert_eq(pbgen.novo_variant_name(".t.E", "lower_case"), "TELowerCase")
+    test.assert_eq(pbgen.novo_oneof_variant_name(".t.M", "pay_by", "card_no"), "TMPayByCardNo")
+    test.assert_eq(pbgen.enum_number_fn_name(".t.Currency"), "t_currency_number")
+    test.assert_eq(pbgen.enum_of_fn_name(".t.Currency"), "t_currency_of")
+
+@test
+fn test_the_scalar_and_field_types()
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeMessage), "")
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeGroup), "")
+    test.assert_eq(pbgen.novo_scalar_type(PbTypeEnum), "Int")
+    let set = PbFileSet { files: [] }
+    let s = fld("s", 1, PbLabelOptional, PbTypeString, "")
+    test.assert_eq(pbgen.novo_field_type(set, s, PbProto2), "?Str")
+    test.assert_eq(pbgen.novo_field_type(set, s, PbProto3), "Str")
+    let r = fld("r", 1, PbLabelRepeated, PbTypeMessage, ".t.Leaf")
+    test.assert_eq(pbgen.novo_field_type(set, r, PbProto3), "[TLeaf]")
+    let m = fld("m", 1, PbLabelOptional, PbTypeMessage, ".t.Leaf")
+    test.assert_eq(pbgen.novo_field_type(set, m, PbProto3), "?TLeaf")
+
+@test
+fn test_the_service_and_descriptor_names()
+    test.assert_eq(pbgen.method_path(".acme.Orders", "Get"), "/acme.Orders/Get")
+    test.assert_eq(pbgen.method_path_fn_name(".acme.Orders", "GetOrder"), "acme_orders_get_order_path")
+    test.assert_eq(pbgen.descriptor_fn_name("acme/order.proto"), "acme_order_descriptor")
+
+// ── the options ─────────────────────────────────────────────────────
+
+@test
+fn test_a_prefix_and_an_embedded_descriptor()
+    let m = msg(".t.M", [fld("a", 1, PbLabelOptional, PbTypeInt32, "")], [])
+    let opts = PbGenOptions { module_prefix: "pb_", embed_descriptor: true }
+    match pbgen.generate_set(PbFileSet { files: [file("m.proto", PbProto3, [m], [])] }, opts)
+        Ok(out) =>
+            test.assert_eq(out[0].module, "pb_m")
+            test.assert_eq(out[0].path, "pb_m.nv")
+            test.assert_eq(str.contains(out[0].source, "pub fn m_descriptor() -> Bytes"), true)
+            test.assert_eq(str.contains(out[0].source, "bytes.from_hex(\"0a"), true)
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_a_descriptor_that_cannot_be_written_embeds_nothing()
+    // A name that is not UTF-8 cannot be written as a string field.
+    let bad = bytes.to_str(hex("ff"))
+    let f = PbFile { name: "m.proto", package: bad, syntax: PbProto3, dependency: [],
+        public_dependency: [], messages: [], enums: [], services: [], extensions: [],
+        options: PbFileOptions { deprecated: false, go_package: "", java_package: "",
+            unknown: pbunknown.empty() } }
+    let opts = PbGenOptions { module_prefix: "", embed_descriptor: true }
+    match pbgen.generate_set(PbFileSet { files: [f] }, opts)
+        Ok(out) => test.assert_eq(str.contains(out[0].source, "bytes.from_hex(\"\")"), true)
+        Err(e)  => test.fail(e.message())
+
+// ── the last descriptor branches ────────────────────────────────────
+
+@test
+fn test_odd_wire_types_in_a_descriptor_read_as_defaults()
+    // A field whose proto3_optional (17) is a string, and a public
+    // dependency (10) written as a fixed32.
+    match pbdesc.parse_file(hex("220512038a0100" + "5501000000"), pbread.default_limits())
+        Ok(f)  =>
+            let m = f.messages[0]
+            test.assert_eq(m.fields[0].proto3_optional, false)
+            test.assert_eq(f.public_dependency.len(), 0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_float_map_key_and_a_dotless_extendee_are_reported()
+    let entry = PbMessage { name: "E", full_name: ".t.E", fields: [
+        fld("key", 1, PbLabelOptional, PbTypeFloat, ""), fld("value", 2, PbLabelOptional, PbTypeInt32, "")],
+        oneofs: [], nested: [], enums: [], extensions: [], extension_ranges: [],
+        reserved_ranges: [], reserved_names: [], map_entry: true, deprecated: false,
+        unknown: pbunknown.empty() }
+    let x = PbField { name: "x", json_name: "x", number: 100, label: PbLabelOptional,
+        field_type: PbTypeInt32, type_name: "", extendee: "Missing", oneof_index: 0 - 1,
+        packed_set: false, packed_value: false, proto3_optional: false, default_value: "",
+        deprecated: false }
+    let f = PbFile { name: "k.proto", package: "t", syntax: PbProto3, dependency: [],
+        public_dependency: [], messages: [entry], enums: [], services: [], extensions: [x],
+        options: PbFileOptions { deprecated: false, go_package: "", java_package: "",
+            unknown: pbunknown.empty() } }
+    let errs = pbdesc.validate(PbFileSet { files: [f] })
+    test.assert_eq(errs.len(), 2)
+    test.assert_eq(errs[0] == PbBadMapKeyType(path: "t.E.key", type_name: "float"), true)
+    test.assert_eq(errs[1] == PbUnresolvedTypeName(path: "x", name: "Missing"), true)
+
+@test
+fn test_file_of_finds_enums_and_answers_none_otherwise()
+    let e = PbEnum { name: "E", full_name: ".t.E", values: [], allow_alias: false,
+        zero_value: "", deprecated: false, unknown: pbunknown.empty() }
+    let set = PbFileSet { files: [file("e.proto", PbProto3, [], [e])] }
+    test.assert_eq(pbdesc.file_of(set, ".t.E")?.name ?? "", "e.proto")
+    test.assert_eq(pbdesc.file_of(set, ".t.Nope") == None, true)
+
+@test
+fn test_a_field_that_is_not_a_map_has_no_entry_fields()
+    let leaf = msg(".t.Leaf", [fld("a", 1, PbLabelOptional, PbTypeInt32, "")], [])
+    let set = PbFileSet { files: [file("l.proto", PbProto3, [leaf], [])] }
+    let single = fld("s", 1, PbLabelOptional, PbTypeMessage, ".t.Leaf")
+    let list_of = fld("l", 2, PbLabelRepeated, PbTypeMessage, ".t.Leaf")
+    test.assert_eq(pbdesc.is_map_field(set, single), false)
+    test.assert_eq(pbdesc.map_value_field(set, list_of) == None, true)
+    test.assert_eq(pbdesc.map_key_field(set, single) == None, true)
+
+// ── the last dynamic branches ───────────────────────────────────────
+
+@test
+fn test_a_group_arriving_for_a_field_that_is_not_a_group_is_kept()
+    let m = msg(".t.M", [fld("a", 1, PbLabelOptional, PbTypeInt32, "")], [])
+    let set = PbFileSet { files: [file("g.proto", PbProto2, [m], [])] }
+    match pbdyn.decode(set, ".t.M", hex("0b0c"), pbread.default_limits())
+        Ok(x)  => test.assert_eq(pbunknown.count(x.unknown), 1)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_type_named_without_a_dot_is_reported_by_its_own_name()
+    let m = msg("Loose", [], [])
+    let set = PbFileSet { files: [file("n.proto", PbProto3, [m], [])] }
+    match pbdyn.encode(set, pbdyn.set(pbdyn.message("Loose"), 4, PbNum(v: 1)))
+        Ok(_)  => test.fail("field 4 is not declared")
+        Err(e) => test.assert_eq(e == PbSchemaRefused(error: PbUndeclaredField(path: "Loose", field: 4)), true)
+    test.assert_eq(pbread.bits_of(PbRawBytes(data: hex("01"))), 0)
+    test.assert_eq(bytes.len(pbread.data_of(PbRawVarint(bits: 1))), 0)
+
+@test
+fn test_every_map_key_type_protobuf_forbids_is_reported()
+    var names: [Str] = []
+    for t in [PbTypeDouble, PbTypeFloat, PbTypeBytes, PbTypeMessage, PbTypeGroup, PbTypeEnum,
+              PbTypeString]
+        let entry = PbMessage { name: "E", full_name: ".t.E", fields: [
+            fld("key", 1, PbLabelOptional, t, ""), fld("value", 2, PbLabelOptional, PbTypeInt32, "")],
+            oneofs: [], nested: [], enums: [], extensions: [], extension_ranges: [],
+            reserved_ranges: [], reserved_names: [], map_entry: true, deprecated: false,
+            unknown: pbunknown.empty() }
+        for e in pbdesc.validate(PbFileSet { files: [file("k.proto", PbProto2, [entry], [])] })
+            match e
+                PbBadMapKeyType(_, name) => list.push(names, name)
+                _                        => ()
+    test.assert_eq(str.join(names, " "), "double float bytes message group enum")
+
+@test
+fn test_a_repeated_field_has_no_presence()
+    let r = fld("r", 1, PbLabelRepeated, PbTypeInt32, "")
+    test.assert_eq(pbdesc.has_presence(r, PbProto2), false)
