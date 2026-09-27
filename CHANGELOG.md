@@ -4,7 +4,7 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
-## 0.1.0 — 2026-09-27
+## 0.1.0 — 2026-09-28
 
 The first implementation of the interface published as 0.0.1: the
 wire format, the reader and the writers, descriptor sets, the dynamic
@@ -68,7 +68,8 @@ message and the code generator.
 
 - leb128-nv `^0.1.7`, zigzag-nv `^0.1.5` and varint-nv `^0.1.6`, the
   first releases of each that build with novo 0.11 and later.
-- The toolchain floor is 0.13.0.
+- The toolchain floor is 0.14.0.  The bodies target novo 0.14.0 and
+  carry no workaround for a compiler defect.
 
 ### Tests
 
