@@ -25,6 +25,7 @@
 use std.bytes
 use pbwire
 use pbunknown
+use pberr
 
 // ── how long it will be ──────────────────────────────────────────────
 
@@ -116,14 +117,14 @@ fn check(field: Int, need: Int, dst: Cursor) -> Result<Unit, PbEncodeError>
 
 // Write the key and answer its length.
 fn put_key(field: Int, w: PbWireType, var dst: Cursor) -> Result<Int, PbEncodeError>
-    pbwire.write_tag_into(pbwire.tag(field, w), dst)
+    pbwire.write_tag_into(pbwire.tag(field, w), var dst)
 
 // Write a varint field: `uint32`, `uint64`, `bool` as 0 or 1, or an
 // enum's number written as an `int64`.
 pub fn write_varint_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check(field, varint_field_len(field, v), dst)!
-    let k = put_key(field, PbWireVarint, dst)!
-    Ok(k + pbwire.write_varint_into(v, dst)!)
+    let k = put_key(field, PbWireVarint, var dst)!
+    Ok(k + pbwire.write_varint_into(v, var dst)!)
 
 // Write an `int32` or `int64` field: two's complement, sign-extended to
 // sixty-four bits.
@@ -131,7 +132,7 @@ pub fn write_varint_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, Pb
 // Every `Int` is a valid `int64`, so nothing is range-checked here.
 // `pbwire.write_int32_into` is the checked `int32` form.
 pub fn write_int_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    write_varint_field(field, v, dst)
+    write_varint_field(field, v, var dst)
 
 // Write an `sint32` field: the zigzag fold, then a varint.
 // `PbValueOutOfRange` for a value outside the `int32` range.
@@ -139,14 +140,14 @@ pub fn write_sint32_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, Pb
     check(field, sint32_field_len(field, v), dst)!
     if v < 0 - 2147483648 or v > 2147483647
         return Err(PbValueOutOfRange(field: field, value: v))
-    let k = put_key(field, PbWireVarint, dst)!
-    Ok(k + pbwire.write_sint32_into(v, dst)!)
+    let k = put_key(field, PbWireVarint, var dst)!
+    Ok(k + pbwire.write_sint32_into(v, var dst)!)
 
 // Write an `sint64` field.
 pub fn write_sint64_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check(field, sint64_field_len(field, v), dst)!
-    let k = put_key(field, PbWireVarint, dst)!
-    Ok(k + pbwire.write_sint64_into(v, dst)!)
+    let k = put_key(field, PbWireVarint, var dst)!
+    Ok(k + pbwire.write_sint64_into(v, var dst)!)
 
 // Write a `bool` field as the varint 0 or 1.
 //
@@ -154,7 +155,7 @@ pub fn write_sint64_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, Pb
 // nothing else, so two encodings of the same message are the same
 // bytes.
 pub fn write_bool_field(field: Int, v: Bool, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    write_varint_field(field, (if v then 1 else 0), dst)
+    write_varint_field(field, (if v then 1 else 0), var dst)
 
 // Write a `fixed32` or `sfixed32` field: four little-endian bytes.
 // `PbValueOutOfRange` outside `-2^31 ..= 2^32 - 1`.
@@ -162,27 +163,27 @@ pub fn write_fixed32_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, P
     check(field, fixed_field_len(field, PbTypeFixed32), dst)!
     if v < 0 - 2147483648 or v > 0xffffffff
         return Err(PbValueOutOfRange(field: field, value: v))
-    let k = put_key(field, PbWireFixed32, dst)!
-    Ok(k + pbwire.write_fixed32_into(v, dst)!)
+    let k = put_key(field, PbWireFixed32, var dst)!
+    Ok(k + pbwire.write_fixed32_into(v, var dst)!)
 
 // Write a `fixed64` or `sfixed64` field: eight little-endian bytes.
 pub fn write_fixed64_field(field: Int, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check(field, fixed_field_len(field, PbTypeFixed64), dst)!
-    let k = put_key(field, PbWireFixed64, dst)!
-    Ok(k + pbwire.write_fixed64_into(v, dst)!)
+    let k = put_key(field, PbWireFixed64, var dst)!
+    Ok(k + pbwire.write_fixed64_into(v, var dst)!)
 
 // Write a `float` field: IEEE 754 binary32, rounded from the
 // sixty-four-bit `Float` the caller holds.
 pub fn write_float_field(field: Int, v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check(field, fixed_field_len(field, PbTypeFloat), dst)!
-    let k = put_key(field, PbWireFixed32, dst)!
-    Ok(k + pbwire.write_float_into(v, dst)!)
+    let k = put_key(field, PbWireFixed32, var dst)!
+    Ok(k + pbwire.write_float_into(v, var dst)!)
 
 // Write a `double` field: IEEE 754 binary64.
 pub fn write_double_field(field: Int, v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check(field, fixed_field_len(field, PbTypeDouble), dst)!
-    let k = put_key(field, PbWireFixed64, dst)!
-    Ok(k + pbwire.write_double_into(v, dst)!)
+    let k = put_key(field, PbWireFixed64, var dst)!
+    Ok(k + pbwire.write_double_into(v, var dst)!)
 
 // Write a `string` field.
 //
@@ -193,14 +194,14 @@ pub fn write_string_field(field: Int, s: Str, var dst: Cursor) -> Result<Int, Pb
     let bad = pbwire.first_non_utf8(b, 0, bytes.len(b))
     if bad >= 0
         return Err(PbEncodeNotUtf8(field: field, at: bad))
-    write_bytes_field(field, b, dst)
+    write_bytes_field(field, b, var dst)
 
 // Write a `bytes` field: any octets, length-prefixed.
 pub fn write_bytes_field(field: Int, b: Bytes, var dst: Cursor) -> Result<Int, PbEncodeError> []
     let n = bytes.len(b)
     check(field, delimited_field_len(field, n), dst)!
-    let k = put_key(field, PbWireBytes, dst)!
-    let p = pbwire.write_varint_into(n, dst)!
+    let k = put_key(field, PbWireBytes, var dst)!
+    let p = pbwire.write_varint_into(n, var dst)!
     dst.put_bytes(b)
     Ok(k + p + n)
 
@@ -210,7 +211,7 @@ pub fn write_bytes_field(field: Int, b: Bytes, var dst: Cursor) -> Result<Int, P
 // received this way.
 pub fn write_message_field(field: Int, body: Bytes,
                            var dst: Cursor) -> Result<Int, PbEncodeError> []
-    write_bytes_field(field, body, dst)
+    write_bytes_field(field, body, var dst)
 
 // Write a packed repeated field: one key, one length, then the
 // elements' payloads end to end.
@@ -227,10 +228,10 @@ pub fn write_packed_field(field: Int, t: PbFieldType, values: [Int],
         check_element(field, t, v)!
     let n = packed_payload_len(t, values)
     check(field, delimited_field_len(field, n), dst)!
-    let k = put_key(field, PbWireBytes, dst)!
-    let p = pbwire.write_varint_into(n, dst)!
+    let k = put_key(field, PbWireBytes, var dst)!
+    let p = pbwire.write_varint_into(n, var dst)!
     for v in values
-        let _ = write_element(t, v, dst)!
+        let _ = write_element(t, v, var dst)!
     Ok(k + p + n)
 
 // Refuse an element its type cannot carry.
@@ -252,17 +253,17 @@ fn check_element(field: Int, t: PbFieldType, v: Int) -> Result<Unit, PbEncodeErr
 // Write one element's payload, without a key.
 fn write_element(t: PbFieldType, v: Int, var dst: Cursor) -> Result<Int, PbEncodeError>
     match t
-        PbTypeInt32    => pbwire.write_int32_into(v, dst)
-        PbTypeEnum     => pbwire.write_int32_into(v, dst)
-        PbTypeSint32   => pbwire.write_sint32_into(v, dst)
-        PbTypeSint64   => pbwire.write_sint64_into(v, dst)
-        PbTypeFixed32  => pbwire.write_fixed32_into(v, dst)
-        PbTypeSfixed32 => pbwire.write_fixed32_into(v, dst)
-        PbTypeFloat    => pbwire.write_fixed32_into(v, dst)
-        PbTypeFixed64  => pbwire.write_fixed64_into(v, dst)
-        PbTypeSfixed64 => pbwire.write_fixed64_into(v, dst)
-        PbTypeDouble   => pbwire.write_fixed64_into(v, dst)
-        _              => pbwire.write_varint_into(v, dst)
+        PbTypeInt32    => pbwire.write_int32_into(v, var dst)
+        PbTypeEnum     => pbwire.write_int32_into(v, var dst)
+        PbTypeSint32   => pbwire.write_sint32_into(v, var dst)
+        PbTypeSint64   => pbwire.write_sint64_into(v, var dst)
+        PbTypeFixed32  => pbwire.write_fixed32_into(v, var dst)
+        PbTypeSfixed32 => pbwire.write_fixed32_into(v, var dst)
+        PbTypeFloat    => pbwire.write_fixed32_into(v, var dst)
+        PbTypeFixed64  => pbwire.write_fixed64_into(v, var dst)
+        PbTypeSfixed64 => pbwire.write_fixed64_into(v, var dst)
+        PbTypeDouble   => pbwire.write_fixed64_into(v, var dst)
+        _              => pbwire.write_varint_into(v, var dst)
 
 // Write a repeated varint field the unpacked way: one key per element.
 //
@@ -275,7 +276,7 @@ pub fn write_repeated_varint_field(field: Int, values: [Int],
         need = need + varint_field_len(field, v)
     check(field, need, dst)!
     for v in values
-        let _ = write_varint_field(field, v, dst)!
+        let _ = write_varint_field(field, v, var dst)!
     Ok(need)
 
 // Write a group: the start key, the body's bytes, the end key.  proto2
@@ -284,9 +285,9 @@ pub fn write_group_field(field: Int, body: Bytes, var dst: Cursor) -> Result<Int
     let t = pbwire.tag(field, PbWireStartGroup)
     let need = pbwire.field_len(t, bytes.len(body))
     check(field, need, dst)!
-    let _ = put_key(field, PbWireStartGroup, dst)!
+    let _ = put_key(field, PbWireStartGroup, var dst)!
     dst.put_bytes(body)
-    let _ = put_key(field, PbWireEndGroup, dst)!
+    let _ = put_key(field, PbWireEndGroup, var dst)!
     Ok(need)
 
 // Write the fields a reader kept but did not understand, in arrival
@@ -295,7 +296,7 @@ pub fn write_group_field(field: Int, body: Bytes, var dst: Cursor) -> Result<Int
 // Written last, after every known field, as every other implementation
 // writes them.
 pub fn write_unknown(u: PbUnknownSet, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    pbunknown.write_into(u, dst)
+    pbunknown.write_into(u, var dst)
 
 // ── the builder, for a caller who will not size first ────────────────
 
@@ -379,35 +380,35 @@ pub fn end(b: PbBuilder) -> Result<PbBuilder, PbEncodeError> []
         fields: list.slice(b.fields, 0, b.depth - 1), depth: b.depth - 1, limits: b.limits }
     let n = delimited_field_len(field, bytes.len(body))
     var c = bytes.cursor_le(bytes.zeros(n))
-    let _ = write_message_field(field, body, c)!
+    let _ = write_message_field(field, body, var c)!
     append(outer, c.finish())
 
 // Add one varint field to the open message.
 pub fn put_varint(b: PbBuilder, field: Int, v: Int) -> Result<PbBuilder, PbEncodeError> []
     let n = varint_field_len(field, v)
     var c = bytes.cursor_le(bytes.zeros(n))
-    let _ = write_varint_field(field, v, c)!
+    let _ = write_varint_field(field, v, var c)!
     append(b, c.finish())
 
 // Add one `sint64` field to the open message.
 pub fn put_sint(b: PbBuilder, field: Int, v: Int) -> Result<PbBuilder, PbEncodeError> []
     let n = sint64_field_len(field, v)
     var c = bytes.cursor_le(bytes.zeros(n))
-    let _ = write_sint64_field(field, v, c)!
+    let _ = write_sint64_field(field, v, var c)!
     append(b, c.finish())
 
 // Add one `string` field to the open message.
 pub fn put_string(b: PbBuilder, field: Int, s: Str) -> Result<PbBuilder, PbEncodeError> []
     let n = delimited_field_len(field, str.len(s))
     var c = bytes.cursor_le(bytes.zeros(n))
-    let _ = write_string_field(field, s, c)!
+    let _ = write_string_field(field, s, var c)!
     append(b, c.finish())
 
 // Add one `bytes` field to the open message.
 pub fn put_bytes(b: PbBuilder, field: Int, v: Bytes) -> Result<PbBuilder, PbEncodeError> []
     let n = delimited_field_len(field, bytes.len(v))
     var c = bytes.cursor_le(bytes.zeros(n))
-    let _ = write_bytes_field(field, v, c)!
+    let _ = write_bytes_field(field, v, var c)!
     append(b, c.finish())
 
 // Add one fixed-width field of type `t` to the open message.
@@ -423,10 +424,10 @@ pub fn put_fixed(b: PbBuilder, field: Int, t: PbFieldType,
     let n = fixed_field_len(field, t)
     if w == 4
         var c = bytes.cursor_le(bytes.zeros(n))
-        let _ = write_fixed32_field(field, v, c)!
+        let _ = write_fixed32_field(field, v, var c)!
         return append(b, c.finish())
     var c = bytes.cursor_le(bytes.zeros(n))
-    let _ = write_fixed64_field(field, v, c)!
+    let _ = write_fixed64_field(field, v, var c)!
     append(b, c.finish())
 
 // Add one packed repeated field to the open message.
@@ -436,14 +437,14 @@ pub fn put_packed(b: PbBuilder, field: Int, t: PbFieldType,
         return Err(PbValueOutOfRange(field: field, value: pbwire.type_code(t)))
     let n = delimited_field_len(field, packed_payload_len(t, values))
     var c = bytes.cursor_le(bytes.zeros(n))
-    let _ = write_packed_field(field, t, values, c)!
+    let _ = write_packed_field(field, t, values, var c)!
     append(b, c.finish())
 
 // Add the fields a reader kept to the end of the open message.
 pub fn put_unknown(b: PbBuilder, u: PbUnknownSet) -> Result<PbBuilder, PbEncodeError> []
     let n = pbunknown.encoded_len(u)
     var c = bytes.cursor_le(bytes.zeros(n))
-    let _ = pbunknown.write_into(u, c)!
+    let _ = pbunknown.write_into(u, var c)!
     append(b, c.finish())
 
 // Close the builder and answer the top-level message's bytes.

@@ -27,6 +27,7 @@ use pbread
 use pbunknown
 use pbwrite
 use pbcodec
+use pberr
 
 // Which syntax a file declares.
 //
@@ -817,7 +818,7 @@ pub fn validate(set: PbFileSet) -> [PbSchemaError] []
         for e in all_enums(f)
             list.append(errs, check_enum(e, p3))
         for x in all_extensions(f)
-            check_type(errs, set, x, dotless(x.extendee) + "." + x.name)
+            check_type(var errs, set, x, dotless(x.extendee) + "." + x.name)
             if x.extendee != "" and find_message(set, x.extendee) == None
                 list.push(errs, PbUnresolvedTypeName(path: x.name, name: x.extendee))
     errs
@@ -853,7 +854,7 @@ fn check_message(set: PbFileSet, m: PbMessage, p3: Bool) -> [PbSchemaError]
             list.push(errs, PbReservedInSchema(path: fp, field: f.number))
         if f.oneof_index >= list.len(m.oneofs)
             list.push(errs, PbOneofIndexOutOfRange(path: fp, index: f.oneof_index))
-        check_type(errs, set, f, fp)
+        check_type(var errs, set, f, fp)
         if p3
             if f.field_type == PbTypeGroup
                 list.push(errs, PbNotInProto3(path: fp, what: "a group"))
@@ -862,7 +863,7 @@ fn check_message(set: PbFileSet, m: PbMessage, p3: Bool) -> [PbSchemaError]
             if f.default_value != ""
                 list.push(errs, PbNotInProto3(path: fp, what: "a default value"))
     if m.map_entry
-        check_map_entry(errs, m, mp)
+        check_map_entry(var errs, m, mp)
     errs
 
 fn reserved(m: PbMessage, f: PbField) -> Bool
@@ -990,13 +991,13 @@ pub fn oneof_fields(m: PbMessage, index: Int) -> [PbField] []
 pub fn all_messages(f: PbFile) -> [PbMessage] []
     var out: [PbMessage] = []
     for m in f.messages
-        flatten(out, m)
+        flatten(var out, m)
     out
 
 fn flatten(var out: [PbMessage], m: PbMessage)
     list.push(out, m)
     for n in m.nested
-        flatten(out, n)
+        flatten(var out, n)
 
 // Every enum the file declares, nested ones included.
 fn all_enums(f: PbFile) -> [PbEnum]

@@ -14,6 +14,7 @@ use pbunknown
 use pbwrite
 use pbdyn
 use pberr
+use pbdesc
 
 fn fld(name: Str, number: Int, label: PbLabel, t: PbFieldType, type_name: Str) -> PbField
     PbField { name: name, json_name: name, number: number, label: label, field_type: t,
@@ -412,13 +413,13 @@ fn test_encode_writes_every_integer_type_and_skips_zeros()
 @test
 fn test_encode_into_refuses_a_buffer_too_small()
     var c = bytes.cursor_le(bytes.zeros(1))
-    match pbdyn.encode_into(p3(), with(1, PbNum(v: 150)), c)
+    match pbdyn.encode_into(p3(), with(1, PbNum(v: 150)), var c)
         Ok(_)  => test.fail("three bytes in one")
         Err(e) => test.assert_eq(e == PbBufferTooSmall(need: 3, left: 1), true)
     match pbdyn.encoded_len(p3(), with(99, PbNum(v: 1)))
         Ok(_)  => test.fail("field 99 is not declared")
         Err(e) => test.assert_eq(str.contains(e.message(), "99"), true)
-    match pbdyn.encode_into(p3(), with(99, PbNum(v: 1)), c)
+    match pbdyn.encode_into(p3(), with(99, PbNum(v: 1)), var c)
         Ok(_)  => test.fail("field 99 is not declared")
         Err(e) => test.assert_eq(str.contains(e.message(), "99"), true)
 

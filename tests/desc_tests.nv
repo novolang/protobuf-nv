@@ -8,6 +8,7 @@ use pbwire
 use pbread
 use pbunknown
 use pbdesc
+use pberr
 
 fn hex(h: Str) -> Bytes
     bytes.from_hex(h) ?? bytes.zeros(0)
@@ -38,8 +39,8 @@ fn file(name: Str, syntax: PbSyntax, messages: [PbMessage], enums: [PbEnum]) -> 
 fn opt_field(n: Int) -> PbUnknownSet
     // Field `n`, a varint 1: an option this package does not name.
     var c = bytes.cursor_le(bytes.zeros(8))
-    let _ = pbwire.write_tag_into(pbwire.tag(n, PbWireVarint), c)
-    let _ = pbwire.write_varint_into(1, c)
+    let _ = pbwire.write_tag_into(pbwire.tag(n, PbWireVarint), var c)
+    let _ = pbwire.write_varint_into(1, var c)
     let used = c.pos()
     pbunknown.keep(pbunknown.empty(), pbwire.tag(n, PbWireVarint), bytes.slice(c.finish(), 0, used))
 

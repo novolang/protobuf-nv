@@ -18,6 +18,7 @@ use pbwire
 use pbread
 use pbunknown
 use pbwrite
+use pberr
 
 // One top-level field of a message: its tag, its payload, where its key
 // is, and the bytes it occupies with the key.
@@ -203,16 +204,16 @@ pub fn int_len(field: Int, t: PbFieldType, v: Int) -> Int []
 pub fn write_int(field: Int, t: PbFieldType, v: Int,
                  var dst: Cursor) -> Result<Int, PbEncodeError> []
     match t
-        PbTypeSint32   => pbwrite.write_sint32_field(field, v, dst)
-        PbTypeSint64   => pbwrite.write_sint64_field(field, v, dst)
-        PbTypeFixed32  => pbwrite.write_fixed32_field(field, v, dst)
-        PbTypeSfixed32 => pbwrite.write_fixed32_field(field, v, dst)
-        PbTypeFixed64  => pbwrite.write_fixed64_field(field, v, dst)
-        PbTypeSfixed64 => pbwrite.write_fixed64_field(field, v, dst)
+        PbTypeSint32   => pbwrite.write_sint32_field(field, v, var dst)
+        PbTypeSint64   => pbwrite.write_sint64_field(field, v, var dst)
+        PbTypeFixed32  => pbwrite.write_fixed32_field(field, v, var dst)
+        PbTypeSfixed32 => pbwrite.write_fixed32_field(field, v, var dst)
+        PbTypeFixed64  => pbwrite.write_fixed64_field(field, v, var dst)
+        PbTypeSfixed64 => pbwrite.write_fixed64_field(field, v, var dst)
         _              =>
             if not fits32(t, v)
                 return Err(PbValueOutOfRange(field: field, value: v))
-            pbwrite.write_varint_field(field, v, dst)
+            pbwrite.write_varint_field(field, v, var dst)
 
 fn fits32(t: PbFieldType, v: Int) -> Bool
     match t
@@ -229,8 +230,8 @@ pub fn real_len(field: Int, t: PbFieldType) -> Int []
 pub fn write_real(field: Int, t: PbFieldType, v: Float,
                   var dst: Cursor) -> Result<Int, PbEncodeError> []
     if t == PbTypeFloat
-        return pbwrite.write_float_field(field, v, dst)
-    pbwrite.write_double_field(field, v, dst)
+        return pbwrite.write_float_field(field, v, var dst)
+    pbwrite.write_double_field(field, v, var dst)
 
 // How many bytes a repeated integral field occupies, packed or with a
 // key per element.  An empty field occupies nothing.
@@ -251,10 +252,10 @@ pub fn write_ints(field: Int, t: PbFieldType, vs: [Int], packed: Bool,
     if list.len(vs) == 0
         return Ok(0)
     if packed
-        return pbwrite.write_packed_field(field, t, vs, dst)
+        return pbwrite.write_packed_field(field, t, vs, var dst)
     var n = 0
     for v in vs
-        n = n + write_int(field, t, v, dst)!
+        n = n + write_int(field, t, v, var dst)!
     Ok(n)
 
 // The bit patterns a packed `float` or `double` field is written from.
@@ -278,10 +279,10 @@ pub fn write_reals(field: Int, t: PbFieldType, vs: [Float], packed: Bool,
     if list.len(vs) == 0
         return Ok(0)
     if packed
-        return pbwrite.write_packed_field(field, t, real_bits(t, vs), dst)
+        return pbwrite.write_packed_field(field, t, real_bits(t, vs), var dst)
     var n = 0
     for v in vs
-        n = n + write_real(field, t, v, dst)!
+        n = n + write_real(field, t, v, var dst)!
     Ok(n)
 
 fn flag_bits(vs: [Bool]) -> [Int]
@@ -297,7 +298,7 @@ pub fn flags_len(field: Int, vs: [Bool], packed: Bool) -> Int []
 // Write a repeated `bool` field.
 pub fn write_flags(field: Int, vs: [Bool], packed: Bool,
                    var dst: Cursor) -> Result<Int, PbEncodeError> []
-    write_ints(field, PbTypeBool, flag_bits(vs), packed, dst)
+    write_ints(field, PbTypeBool, flag_bits(vs), packed, var dst)
 
 // How many bytes a `bool` field occupies.
 pub fn flag_len(field: Int) -> Int []
@@ -319,5 +320,5 @@ pub fn nested_len(field: Int, body: Int) -> Int []
 // Write a submessage field's key and length prefix, and answer their
 // byte count.  The caller writes the body next.
 pub fn write_nested_head(field: Int, body: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
-    let k = pbwire.write_tag_into(pbwire.tag(field, PbWireBytes), dst)!
-    Ok(k + pbwire.write_varint_into(body, dst)!)
+    let k = pbwire.write_tag_into(pbwire.tag(field, PbWireBytes), var dst)!
+    Ok(k + pbwire.write_varint_into(body, var dst)!)

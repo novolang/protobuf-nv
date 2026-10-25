@@ -306,7 +306,7 @@ fn encode_depth(set: PbFileSet, m: PbDynamic, depth: Int) -> Result<Bytes, PbEnc
         let Some(fd) = pbdesc.field_by_number(md, sf.number) else return refused(PbUndeclaredField(path: path_of(md.full_name), field: sf.number))
         list.push(parts, field_bytes(set, md, syntax, fd, sf.value, depth)!)
     var c = bytes.cursor_le(bytes.zeros(pbunknown.encoded_len(m.unknown)))
-    let _ = pbunknown.write_into(m.unknown, c)!
+    let _ = pbunknown.write_into(m.unknown, var c)!
     list.push(parts, c.finish())
     Ok(bytes.concat(parts))
 
@@ -352,7 +352,7 @@ fn room(n: Int) -> Cursor
 
 fn delimited(field: Int, body: Bytes) -> Result<Bytes, PbEncodeError>
     var c = room(pbwrite.delimited_field_len(field, bytes.len(body)))
-    let _ = pbwrite.write_message_field(field, body, c)!
+    let _ = pbwrite.write_message_field(field, body, var c)!
     Ok(c.finish())
 
 // The integer a numeric value holds, or `None` for another kind.
@@ -383,7 +383,7 @@ fn packed(md: PbMessage, fd: PbField, items: [PbValue]) -> Result<Bytes, PbEncod
             return mismatch(md, fd, w, it)
         list.push(values, n)
     var c = room(pbwrite.delimited_field_len(fd.number, pbwrite.packed_payload_len(t, values)))
-    let _ = pbwrite.write_packed_field(fd.number, t, values, c)!
+    let _ = pbwrite.write_packed_field(fd.number, t, values, var c)!
     Ok(c.finish())
 
 // The kind of value a declared type takes, as `value_kind` names it.
@@ -407,19 +407,19 @@ fn one_bytes(set: PbFileSet, md: PbMessage, fd: PbField, v: PbValue,
     match (t, v)
         (PbTypeDouble, PbReal(x))      =>
             var c = room(pbwrite.fixed_field_len(n, t))
-            let _ = pbwrite.write_double_field(n, x, c)!
+            let _ = pbwrite.write_double_field(n, x, var c)!
             Ok(c.finish())
         (PbTypeFloat, PbReal(x))       =>
             var c = room(pbwrite.fixed_field_len(n, t))
-            let _ = pbwrite.write_float_field(n, x, c)!
+            let _ = pbwrite.write_float_field(n, x, var c)!
             Ok(c.finish())
         (PbTypeBool, PbFlag(b))        =>
             var c = room(pbwrite.varint_field_len(n, 1))
-            let _ = pbwrite.write_bool_field(n, b, c)!
+            let _ = pbwrite.write_bool_field(n, b, var c)!
             Ok(c.finish())
         (PbTypeString, PbText(s))      =>
             var c = room(pbwrite.delimited_field_len(n, str.len(s)))
-            let _ = pbwrite.write_string_field(n, s, c)!
+            let _ = pbwrite.write_string_field(n, s, var c)!
             Ok(c.finish())
         (PbTypeBytes, PbOctets(b))     => delimited(n, b)
         (PbTypeMessage, PbNested(sub)) =>
@@ -431,7 +431,7 @@ fn one_bytes(set: PbFileSet, md: PbMessage, fd: PbField, v: PbValue,
                 return refused(PbKindMismatch(path: field_path(md, fd), want: fd.type_name, got: sub.type_name))
             let body = encode_depth(set, sub, depth + 1)!
             var c = room(pbwire.field_len(pbwire.tag(n, PbWireStartGroup), bytes.len(body)))
-            let _ = pbwrite.write_group_field(n, body, c)!
+            let _ = pbwrite.write_group_field(n, body, var c)!
             Ok(c.finish())
         _                              =>
             let w = want_of(t)
@@ -444,11 +444,11 @@ fn int_bytes(n: Int, t: PbFieldType, x: Int) -> Result<Bytes, PbEncodeError>
     match t
         PbTypeSint32   =>
             var c = room(pbwrite.sint32_field_len(n, x))
-            let _ = pbwrite.write_sint32_field(n, x, c)!
+            let _ = pbwrite.write_sint32_field(n, x, var c)!
             Ok(c.finish())
         PbTypeSint64   =>
             var c = room(pbwrite.sint64_field_len(n, x))
-            let _ = pbwrite.write_sint64_field(n, x, c)!
+            let _ = pbwrite.write_sint64_field(n, x, var c)!
             Ok(c.finish())
         PbTypeFixed32  => fixed32(n, x)
         PbTypeSfixed32 => fixed32(n, x)
@@ -458,7 +458,7 @@ fn int_bytes(n: Int, t: PbFieldType, x: Int) -> Result<Bytes, PbEncodeError>
             if not in_range(t, x)
                 return Err(PbValueOutOfRange(field: n, value: x))
             var c = room(pbwrite.varint_field_len(n, x))
-            let _ = pbwrite.write_varint_field(n, x, c)!
+            let _ = pbwrite.write_varint_field(n, x, var c)!
             Ok(c.finish())
 
 // Whether a varint type carries `x`: the thirty-two-bit types their
@@ -472,12 +472,12 @@ fn in_range(t: PbFieldType, x: Int) -> Bool
 
 fn fixed32(n: Int, x: Int) -> Result<Bytes, PbEncodeError>
     var c = room(pbwrite.fixed_field_len(n, PbTypeFixed32))
-    let _ = pbwrite.write_fixed32_field(n, x, c)!
+    let _ = pbwrite.write_fixed32_field(n, x, var c)!
     Ok(c.finish())
 
 fn fixed64(n: Int, x: Int) -> Result<Bytes, PbEncodeError>
     var c = room(pbwrite.fixed_field_len(n, PbTypeFixed64))
-    let _ = pbwrite.write_fixed64_field(n, x, c)!
+    let _ = pbwrite.write_fixed64_field(n, x, var c)!
     Ok(c.finish())
 
 // How many bytes `encode` produces.  It encodes to count.
@@ -598,14 +598,14 @@ pub fn merge(a: PbDynamic, b: PbDynamic) -> PbDynamic []
 // for a tool that tells a person what is wrong.
 pub fn type_check(set: PbFileSet, m: PbDynamic) -> [PbSchemaError] []
     var errs: [PbSchemaError] = []
-    check_into(errs, set, m)
+    check_into(var errs, set, m)
     errs
 
 fn check_into(var errs: [PbSchemaError], set: PbFileSet, m: PbDynamic)
-    let Some(md) = pbdesc.find_message(set, m.type_name) else return push(errs, PbUnresolvedTypeName(path: "", name: m.type_name))
+    let Some(md) = pbdesc.find_message(set, m.type_name) else return push(var errs, PbUnresolvedTypeName(path: "", name: m.type_name))
     for sf in m.fields
         match pbdesc.field_by_number(md, sf.number)
-            Some(fd) => check_value(errs, set, md, fd, sf.value)
+            Some(fd) => check_value(var errs, set, md, fd, sf.value)
             None     => list.push(errs, PbUndeclaredField(path: path_of(md.full_name), field: sf.number))
 
 fn push(var errs: [PbSchemaError], e: PbSchemaError)
@@ -617,18 +617,18 @@ fn check_value(var errs: [PbSchemaError], set: PbFileSet, md: PbMessage, fd: PbF
         match v
             PbMap(entries) =>
                 for e in entries
-                    check_one(errs, set, fp, pbdesc.map_key_field(set, fd), e.key)
-                    check_one(errs, set, fp, pbdesc.map_value_field(set, fd), e.value)
+                    check_one(var errs, set, fp, pbdesc.map_key_field(set, fd), e.key)
+                    check_one(var errs, set, fp, pbdesc.map_value_field(set, fd), e.value)
             _              => list.push(errs, PbKindMismatch(path: fp, want: "map", got: value_kind(v)))
         return
     if fd.label == PbLabelRepeated
         match v
             PbList(items) =>
                 for it in items
-                    check_one(errs, set, fp, Some(fd), it)
+                    check_one(var errs, set, fp, Some(fd), it)
             _             => list.push(errs, PbKindMismatch(path: fp, want: "list", got: value_kind(v)))
         return
-    check_one(errs, set, fp, Some(fd), v)
+    check_one(var errs, set, fp, Some(fd), v)
 
 fn check_one(var errs: [PbSchemaError], set: PbFileSet, fp: Str, f: ?PbField, v: PbValue)
     let Some(fd) = f else return
@@ -640,7 +640,7 @@ fn check_one(var errs: [PbSchemaError], set: PbFileSet, fp: Str, f: ?PbField, v:
                 if sub.type_name != fd.type_name
                     list.push(errs, PbKindMismatch(path: fp, want: fd.type_name, got: sub.type_name))
                 else
-                    check_into(errs, set, sub)
+                    check_into(var errs, set, sub)
             _             => ()
         return
     list.push(errs, PbKindMismatch(path: fp, want: want, got: got))

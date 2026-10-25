@@ -12,6 +12,8 @@ use pbunknown
 use pbdesc
 use pbdyn
 use pbgen
+use pberr
+use pbwire
 
 fn hex(h: Str) -> Bytes
     bytes.from_hex(h) ?? bytes.zeros(0)

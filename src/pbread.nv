@@ -243,7 +243,7 @@ fn run(buf: Bytes, base: Int, final: Bool, limits: PbLimits, groups: [Int],
             PbScanNeed(k)        =>
                 need = k
             PbScanEvent(ev, len) =>
-                d = enter(open, d, ev, limits)!
+                d = enter(var open, d, ev, limits)!
                 list.push(events, ev)
                 pos = pos + len
     Ok(PbRun { events: events, used: pos, groups: open, depth: d, need: need })

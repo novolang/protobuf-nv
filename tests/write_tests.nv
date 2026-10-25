@@ -7,6 +7,7 @@ use std.bytes
 use pbread
 use pbwrite
 use pberr
+use pbwire
 
 fn hex(h: Str) -> Bytes
     bytes.from_hex(h) ?? bytes.zeros(0)
@@ -69,26 +70,26 @@ fn test_a_packed_payload_sizes_each_element_by_its_type()
 @test
 fn test_a_field_number_is_checked_before_the_room()
     var c = bytes.cursor_le(bytes.zeros(0))
-    test.assert_eq(refusal(pbwrite.write_varint_field(0, 1, c)) == PbBadFieldNumber(field: 0), true)
-    test.assert_eq(refusal(pbwrite.write_varint_field(19000, 1, c)) == PbReservedFieldNumber(field: 19000), true)
-    test.assert_eq(refusal(pbwrite.write_varint_field(1, 1, c)) == PbBufferTooSmall(need: 2, left: 0), true)
+    test.assert_eq(refusal(pbwrite.write_varint_field(0, 1, var c)) == PbBadFieldNumber(field: 0), true)
+    test.assert_eq(refusal(pbwrite.write_varint_field(19000, 1, var c)) == PbReservedFieldNumber(field: 19000), true)
+    test.assert_eq(refusal(pbwrite.write_varint_field(1, 1, var c)) == PbBufferTooSmall(need: 2, left: 0), true)
 
 @test
 fn test_a_value_its_type_cannot_carry_is_refused_with_its_field()
     var c = bytes.cursor_le(bytes.zeros(64))
-    test.assert_eq(refusal(pbwrite.write_sint32_field(3, 2147483648, c)) == PbValueOutOfRange(field: 3, value: 2147483648),
+    test.assert_eq(refusal(pbwrite.write_sint32_field(3, 2147483648, var c)) == PbValueOutOfRange(field: 3, value: 2147483648),
         true)
-    test.assert_eq(refusal(pbwrite.write_fixed32_field(4, 0 - 2147483649, c)) == PbValueOutOfRange(field: 4, value: 0 - 2147483649),
+    test.assert_eq(refusal(pbwrite.write_fixed32_field(4, 0 - 2147483649, var c)) == PbValueOutOfRange(field: 4, value: 0 - 2147483649),
         true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(5, PbTypeString, [1], c)) == PbValueOutOfRange(field: 5, value: 9),
+    test.assert_eq(refusal(pbwrite.write_packed_field(5, PbTypeString, [1], var c)) == PbValueOutOfRange(field: 5, value: 9),
         true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeInt32, [2147483648], c)) == PbValueOutOfRange(field: 6, value: 2147483648),
+    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeInt32, [2147483648], var c)) == PbValueOutOfRange(field: 6, value: 2147483648),
         true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeUint32, [0 - 1], c)) == PbValueOutOfRange(field: 6, value: 0 - 1),
+    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeUint32, [0 - 1], var c)) == PbValueOutOfRange(field: 6, value: 0 - 1),
         true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeBool, [2], c)) == PbValueOutOfRange(field: 6, value: 2),
+    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeBool, [2], var c)) == PbValueOutOfRange(field: 6, value: 2),
         true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeSfixed32, [0 - 2147483649], c)) == PbValueOutOfRange(field: 6, value: 0 - 2147483649),
+    test.assert_eq(refusal(pbwrite.write_packed_field(6, PbTypeSfixed32, [0 - 2147483649], var c)) == PbValueOutOfRange(field: 6, value: 0 - 2147483649),
         true)
     test.assert_eq(c.pos(), 0)
 
@@ -96,7 +97,7 @@ fn test_a_value_its_type_cannot_carry_is_refused_with_its_field()
 fn test_a_string_that_is_not_utf8_is_refused_at_its_bad_byte()
     var c = bytes.cursor_le(bytes.zeros(16))
     let s = bytes.to_str(hex("61ff"))
-    test.assert_eq(refusal(pbwrite.write_string_field(2, s, c)) == PbEncodeNotUtf8(field: 2, at: 1), true)
+    test.assert_eq(refusal(pbwrite.write_string_field(2, s, var c)) == PbEncodeNotUtf8(field: 2, at: 1), true)
 
 @test
 fn test_every_packable_type_writes_its_own_width()
@@ -106,18 +107,18 @@ fn test_every_packable_type_writes_its_own_width()
     let widths = [2, 2, 2, 2, 8, 8, 8, 16, 16, 16, 2, 2]
     for i in 0..list.len(types)
         var c = bytes.cursor_le(bytes.zeros(32))
-        match pbwrite.write_packed_field(1, types[i], [1, 0], c)
+        match pbwrite.write_packed_field(1, types[i], [1, 0], var c)
             Ok(n)  => test.assert_eq(n, 2 + widths[i])
             Err(e) => test.fail(e.message())
 
 @test
 fn test_the_repeated_writers_check_the_room_for_every_element()
     var c = bytes.cursor_le(bytes.zeros(3))
-    test.assert_eq(refusal(pbwrite.write_repeated_varint_field(1, [1, 2], c)) == PbBufferTooSmall(need: 4, left: 3),
+    test.assert_eq(refusal(pbwrite.write_repeated_varint_field(1, [1, 2], var c)) == PbBufferTooSmall(need: 4, left: 3),
         true)
-    test.assert_eq(refusal(pbwrite.write_group_field(1, hex("0801"), c)) == PbBufferTooSmall(need: 4, left: 3),
+    test.assert_eq(refusal(pbwrite.write_group_field(1, hex("0801"), var c)) == PbBufferTooSmall(need: 4, left: 3),
         true)
-    test.assert_eq(refusal(pbwrite.write_packed_field(1, PbTypeInt32, [1, 2], c)) == PbBufferTooSmall(need: 4, left: 3),
+    test.assert_eq(refusal(pbwrite.write_packed_field(1, PbTypeInt32, [1, 2], var c)) == PbBufferTooSmall(need: 4, left: 3),
         true)
 
 // ── the builder ─────────────────────────────────────────────────────

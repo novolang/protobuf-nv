@@ -31,6 +31,7 @@ use std.bytes
 use leb128
 use zigzag
 use varint
+use pberr
 
 // Which of the six shapes a key announces.
 pub enum PbWireType
@@ -363,7 +364,7 @@ pub fn read_tag_at(src: Bytes, off: Int) -> Result<PbTagAt, PbDecodeError> []
 // `PbBufferTooSmall` when the key does not fit.
 pub fn write_tag_into(t: PbTag, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check_field(t.field)!
-    write_varint_into(key_of(t), dst)
+    write_varint_into(key_of(t), var dst)
 
 // Refuse a field number a writer may not produce.
 fn check_field(field: Int) -> Result<Unit, PbEncodeError>
@@ -404,7 +405,7 @@ pub struct PbFloatAt
 // which is what `int64` requires and why `-1` is ten bytes long.
 pub fn write_varint_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check_room(leb128.encoded_len(v), dst)!
-    Ok(leb128.encode_into(dst, v))
+    Ok(leb128.encode_into(var dst, v))
 
 // Write an `int32`: sign-extended to sixty-four bits, then a varint.
 //
@@ -413,7 +414,7 @@ pub fn write_varint_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> 
 pub fn write_int32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     if not zigzag.fits32(v)
         return Err(PbValueOutOfRange(field: 0, value: v))
-    write_varint_into(int32_to_wire(v), dst)
+    write_varint_into(int32_to_wire(v), var dst)
 
 // Write an `sint32`: zigzag-nv's thirty-two-bit fold, then a varint.
 //
@@ -430,13 +431,13 @@ pub fn write_int32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> [
 pub fn write_sint32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     if not zigzag.fits32(v)
         return Err(PbValueOutOfRange(field: 0, value: v))
-    write_varint_into(zigzag.encode32(v), dst)
+    write_varint_into(zigzag.encode32(v), var dst)
 
 // Write an `sint64`: the sixty-four-bit fold, then a varint, which is
 // varint-nv's `encode_into`.
 pub fn write_sint64_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check_room(varint.encoded_len(v), dst)!
-    Ok(varint.encode_into(dst, v))
+    Ok(varint.encode_into(var dst, v))
 
 // Write four fixed bytes, little-endian: `fixed32` or `sfixed32`.
 //
@@ -446,13 +447,13 @@ pub fn write_fixed32_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError>
     if v < zigzag.min32() or v > 0xffffffff
         return Err(PbValueOutOfRange(field: 0, value: v))
     check_room(4, dst)!
-    put_le(v, 4, dst)
+    put_le(v, 4, var dst)
     Ok(4)
 
 // Write eight fixed bytes, little-endian: `fixed64` or `sfixed64`.
 pub fn write_fixed64_into(v: Int, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check_room(8, dst)!
-    put_le(v, 8, dst)
+    put_le(v, 8, var dst)
     Ok(8)
 
 // Write `n` little-endian bytes of `v`.
@@ -466,13 +467,13 @@ fn put_le(v: Int, n: Int, var dst: Cursor)
 // binary32, ties to even, as `float32_bits` does.
 pub fn write_float_into(v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check_room(4, dst)!
-    put_le(float32_bits(v), 4, dst)
+    put_le(float32_bits(v), 4, var dst)
     Ok(4)
 
 // Write a `double`: IEEE 754 binary64, little-endian, eight bytes.
 pub fn write_double_into(v: Float, var dst: Cursor) -> Result<Int, PbEncodeError> []
     check_room(8, dst)!
-    put_le(float.to_bits(v), 8, dst)
+    put_le(float.to_bits(v), 8, var dst)
     Ok(8)
 
 // Read a plain varint at `off`: its sixty-four-bit pattern.
