@@ -730,7 +730,9 @@ fn one_write(var s: PbSrc, indent: Int, c: PbCtx, f: PbField, x: Str)
         "message" =>
             let len = "${call(c, f.type_name, len_fn_name(f.type_name))}(${x})"
             emit(var s, indent, "n = n + pbcodec.write_nested_head(${n}, ${len}, dst)!")
-            emit(var s, indent, "n = n + ${call(c, f.type_name, write_fn_name(f.type_name))}(${x}, dst)!")
+            emit(var s,
+                indent,
+                "n = n + ${call(c, f.type_name, write_fn_name(f.type_name))}(${x}, dst)!")
         _         => emit(var s, indent, "n = n + pbcodec.write_int(${n}, ${t}, ${x}, dst)!")
 
 // The members of the oneof at `index`, in field-number order.
@@ -772,7 +774,9 @@ fn gen_message(var s: PbSrc, c: PbCtx, m: PbMessage)
                 if not list.contains(oneofs_done, i)
                     list.push(oneofs_done, i)
                     let o = m.oneofs[i].name
-                    emit(var s, 4, "var ${novo_field_name(o)}: ?${novo_oneof_type_name(m.full_name, o)}")
+                    emit(var s,
+                        4,
+                        "var ${novo_field_name(o)}: ?${novo_oneof_type_name(m.full_name, o)}")
                     list.push(inits, "${novo_field_name(o)}: None")
             PbRepeated  =>
                 emit(var s, 4, "var ${name}: ${novo_field_type(c.set, f, syntax)}")
@@ -890,9 +894,13 @@ fn gen_write(var s: PbSrc, c: PbCtx, m: PbMessage, t: Str)
                 one_write(var s, 8, c, f, "v")
             PbRepeated  =>
                 if fam == "int"
-                    emit(var s, 4, "n = n + pbcodec.write_ints(${f.number}, ${ft}, ${x}, ${packed}, dst)!")
+                    emit(var s,
+                        4,
+                        "n = n + pbcodec.write_ints(${f.number}, ${ft}, ${x}, ${packed}, dst)!")
                 else if fam == "real"
-                    emit(var s, 4, "n = n + pbcodec.write_reals(${f.number}, ${ft}, ${x}, ${packed}, dst)!")
+                    emit(var s,
+                        4,
+                        "n = n + pbcodec.write_reals(${f.number}, ${ft}, ${x}, ${packed}, dst)!")
                 else if fam == "flag"
                     emit(var s, 4, "n = n + pbcodec.write_flags(${f.number}, ${x}, ${packed}, dst)!")
                 else

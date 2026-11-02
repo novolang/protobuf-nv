@@ -71,7 +71,8 @@ fn test_a_packed_payload_sizes_each_element_by_its_type()
 fn test_a_field_number_is_checked_before_the_room()
     var c = bytes.cursor_le(bytes.zeros(0))
     test.assert_eq(refusal(pbwrite.write_varint_field(0, 1, var c)) == PbBadFieldNumber(field: 0), true)
-    test.assert_eq(refusal(pbwrite.write_varint_field(19000, 1, var c)) == PbReservedFieldNumber(field: 19000), true)
+    test.assert_eq(refusal(pbwrite.write_varint_field(19000, 1, var c)) == PbReservedFieldNumber(field: 19000),
+        true)
     test.assert_eq(refusal(pbwrite.write_varint_field(1, 1, var c)) == PbBufferTooSmall(need: 2, left: 0), true)
 
 @test
